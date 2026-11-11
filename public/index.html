@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Supplier e-Invoicing Onboarding | CompuAge Computers L.L.C.</title>
+  <meta name="description" content="UAE e-Invoicing supplier onboarding and information collection form for CompuAge Computers L.L.C.">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <img class="logo" src="/compuage-logo.png" alt="CompuAge Computers L.L.C." width="1104" height="285">
+      <span class="secure"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Zm-1 14-4-4 1.4-1.4L11 13.2l4.6-4.6L17 10l-6 6Z"/></svg>Secure form</span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero" id="hero">
+      <p class="eyebrow">UAE e-Invoicing</p>
+      <h1>Supplier onboarding and information form</h1>
+      <p class="lede">We are updating our supplier records ahead of the UAE Electronic Invoicing requirements under the Federal Tax Authority (FTA) regulations. Please complete this form with your company, tax registration and e-Invoicing details.</p>
+      <ul class="facts">
+        <li><b>About 5 minutes</b><span>to complete</span></li>
+        <li><b>Saved as you go</b><span>on this device</span></li>
+        <li><b>Have ready</b><span>trade licence, VAT and Corporate Tax certificates</span></li>
+      </ul>
+    </section>
+
+    <div class="shell">
+      <nav class="steps" id="steps" aria-label="Form progress"></nav>
+      <div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
+
+      <form id="form" class="card" novalidate autocomplete="on">
+        <div id="panel"></div>
+        <input type="text" name="company_website" id="hp" tabindex="-1" autocomplete="off" class="hp" aria-hidden="true">
+        <div class="nav">
+          <button type="button" class="btn ghost" id="back">Back</button>
+          <span class="stepcount" id="stepcount"></span>
+          <button type="submit" class="btn primary" id="next">Continue</button>
+        </div>
+      </form>
+    </div>
+
+    <p class="foot">The information collected will be used for supplier master data updates, electronic invoice integration and regulatory compliance. Questions? Write to <a href="mailto:accounts@compuagedubai.com">accounts@compuagedubai.com</a></p>
+  </main>
+
+  <footer class="legal">© <span id="yr"></span> CompuAge Computers L.L.C. All rights reserved.</footer>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

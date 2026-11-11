@@ -1,0 +1,16 @@
+{
+  "name": "compuage-suppliers",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "gen:countries": "node scripts/gen-countries.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "libphonenumber-js": "^1.12.0"
+  }
+}
