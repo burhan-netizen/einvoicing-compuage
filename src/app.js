@@ -1,14 +1,14 @@
 import { upload } from '@vercel/blob/client';
 import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
 import { COUNTRIES } from './countries.js';
-import { SECTIONS, DECLARATION, MAX_FILE_MB, FILE_TYPES, isShown, isRequired, validate, summaryRows } from '../lib/schema.js';
+import { SECTIONS, DECLARATION, MAX_FILE_MB, FILE_TYPES, isShown, isRequired, validate, summaryRows, groupItems } from '../lib/schema.js';
 
 const STORE_KEY = 'compuage-supplier-v1';
 const POPULAR = ['AE', 'SA', 'OM', 'QA', 'KW', 'BH', 'IN'];
 const byCode = Object.fromEntries(COUNTRIES.map(c => [c.code, c]));
 const countryName = code => (byCode[code] ? byCode[code].name : code);
 const STEPS = [...SECTIONS.map(s => ({ id: s.id, title: s.title })), { id: 'review', title: 'Review and submit' }];
-const SHORT = { company: 'Company', contact: 'Contact', tax: 'VAT and tax', einvoicing: 'e-Invoicing', documents: 'Documents', review: 'Review' };
+const SHORT = { company: 'Company', ownership: 'Ownership', contact: 'Contacts', tax: 'VAT and tax', einvoicing: 'e-Invoicing', documents: 'Documents', review: 'Review' };
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
@@ -36,8 +36,11 @@ try {
   const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
   if (saved && saved.values) state = { ...state, ...saved, values: { ...state.values, ...saved.values } };
 } catch { /* storage unavailable */ }
-for (const s of SECTIONS) for (const f of s.fields) if (f.type === 'file') delete state.values[f.name];
-if (state.step >= SECTIONS.findIndex(s => s.id === 'documents')) state.step = Math.min(state.step, SECTIONS.findIndex(s => s.id === 'documents'));
+// Uploaded files cannot be restored after a reload, so forget them; submit() sends people back to any missing ones.
+for (const s of SECTIONS) for (const f of s.fields) {
+  if (f.type === 'file') delete state.values[f.name];
+  if (f.type === 'group' && Array.isArray(state.values[f.name])) state.values[f.name].forEach(it => f.fields.forEach(sf => { if (sf.type === 'file') it[sf.name] = null; }));
+}
 const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* ignore */ } };
 
 let errors = {};
@@ -108,75 +111,99 @@ function countryPicker({ value, onChange, dial = false, label = 'Select a countr
 }
 
 // ---------- field rendering ----------
+function clearError(key) {
+  if (!errors[key]) return;
+  delete errors[key];
+  const el = document.querySelector(`[data-field="${key}"]`);
+  el && el.classList.remove('invalid');
+}
 function setValue(name, v, rerender = false) {
   state.values[name] = v;
-  if (errors[name]) { delete errors[name]; const el = document.querySelector(`[data-field="${name}"]`); el && el.classList.remove('invalid'); }
+  clearError(name);
   save();
   if (rerender) renderPanel(false);
 }
+const newPhone = () => ({ iso: 'AE', dial: '971', number: '' });
+const newItem = g => Object.fromEntries(g.fields.map(sf => [sf.name, sf.type === 'phone' ? newPhone() : '']));
 
-function fieldEl(f) {
+// A binding tells a field where its value lives: top level, or inside one person of a group.
+const topBinding = f => ({ key: f.name, get: () => state.values[f.name], set: (v, r) => setValue(f.name, v, r) });
+const itemBinding = (g, i, sf) => {
+  const key = `${g.name}.${i}.${sf.name}`;
+  return { key, get: () => state.values[g.name][i][sf.name], set: (v, r) => { state.values[g.name][i][sf.name] = v; clearError(key); save(); if (r) renderPanel(false); } };
+};
+
+function fieldEl(f, b = topBinding(f)) {
   const v = state.values;
+  const val = b.get();
+  const key = b.key;
   const req = isRequired(f, v);
-  const wrap = h('div', { class: `field${f.half ? ' half' : ''}`, 'data-field': f.name });
-  const id = `f_${f.name}`;
+  const wrap = h('div', { class: `field${f.half ? ' half' : ''}`, 'data-field': key });
+  const id = `f_${key.replace(/\./g, '_')}`;
   const labelEl = h('label', { class: 'label', for: id }, f.label, req ? h('span', { class: 'req', 'aria-hidden': 'true' }, '*') : (f.type !== 'file' && !f.hint ? h('span', { class: 'opt' }, 'Optional') : null));
   if (f.hint && !req && f.type !== 'file') labelEl.append(h('span', { class: 'opt' }, f.hint));
   wrap.append(labelEl);
-  const common = { id, name: f.name, 'aria-describedby': `${id}_err`, 'aria-required': req ? 'true' : null };
+  const common = { id, name: key, 'aria-describedby': `${id}_err`, 'aria-required': req ? 'true' : null };
 
   switch (f.type) {
-    case 'text': case 'email': {
-      const input = h('input', { ...common, class: 'input', type: f.type === 'email' ? 'email' : 'text', value: v[f.name] || '', placeholder: f.placeholder,
-        autocomplete: f.autocomplete || 'off', inputmode: f.type === 'email' ? 'email' : f.inputmode, maxlength: f.maxlength });
+    case 'text': case 'email': case 'percent': {
+      const input = h('input', { ...common, class: 'input', type: f.type === 'email' ? 'email' : 'text', value: val || '', placeholder: f.placeholder || (f.type === 'percent' ? 'e.g. 50' : null),
+        autocomplete: f.autocomplete || 'off', inputmode: f.type === 'email' ? 'email' : f.type === 'percent' ? 'decimal' : f.inputmode, maxlength: f.maxlength });
       input.addEventListener('input', () => {
         if (f.inputmode === 'numeric') input.value = input.value.replace(/\D/g, '');
-        setValue(f.name, input.value);
+        if (f.type === 'percent') input.value = input.value.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+        b.set(input.value);
+        if (f.type === 'percent') updateTotals();
       });
-      wrap.append(input); break;
+      if (f.type === 'percent') wrap.append(h('div', { class: 'suffix' }, input, h('span', {}, '%')));
+      else wrap.append(input);
+      break;
     }
     case 'textarea': {
       const ta = h('textarea', { ...common, class: 'textarea', placeholder: f.placeholder, rows: 3 });
-      ta.value = v[f.name] || '';
-      ta.addEventListener('input', () => setValue(f.name, ta.value));
+      ta.value = val || '';
+      ta.addEventListener('input', () => b.set(ta.value));
       wrap.append(ta); break;
     }
     case 'date': {
-      const input = h('input', { ...common, class: 'input', type: 'date', value: v[f.name] || '' });
-      input.addEventListener('change', () => setValue(f.name, input.value));
+      const input = h('input', { ...common, class: 'input', type: 'date', value: val || '' });
+      input.addEventListener('change', () => b.set(input.value));
       input.addEventListener('click', () => { try { input.showPicker && input.showPicker(); } catch { /* not supported */ } });
       wrap.append(input); break;
     }
     case 'select': {
       const opts = typeof f.options === 'function' ? f.options(v) : f.options;
-      const sel = h('select', { ...common, class: `select${v[f.name] ? '' : ' empty'}` }, h('option', { value: '', disabled: true, selected: !v[f.name] }, f.placeholder || 'Select an option'),
-        ...opts.map(o => h('option', { value: o, selected: v[f.name] === o }, o)));
+      const sel = h('select', { ...common, class: `select${val ? '' : ' empty'}` }, h('option', { value: '', disabled: true, selected: !val }, f.placeholder || 'Select an option'),
+        ...opts.map(o => h('option', { value: o, selected: val === o }, o)));
       sel.addEventListener('change', () => {
         if (f.onChange) Object.assign(state.values, f.onChange(sel.value, state.values));
-        setValue(f.name, sel.value, true);
+        b.set(sel.value, true);
       });
       wrap.append(sel); break;
     }
     case 'country': {
-      wrap.append(countryPicker({ value: v[f.name], onChange: code => {
-        const p = state.values.phone;
-        if (p && !p.number && byCode[code]) state.values.phone = { ...p, iso: code, dial: byCode[code].dial };
-        setValue(f.name, code, true);
+      const top = key === f.name;
+      wrap.append(countryPicker({ value: val, label: top ? 'Select a country' : 'Select nationality', onChange: code => {
+        if (top) {
+          const p = state.values.phone;
+          if (p && !p.number && byCode[code]) state.values.phone = { ...p, iso: code, dial: byCode[code].dial };
+        }
+        b.set(code, top);
       } }));
       labelEl.removeAttribute('for'); break;
     }
     case 'phone': {
-      const p = v.phone || { iso: 'AE', dial: '971', number: '' };
-      const input = h('input', { ...common, type: 'tel', inputmode: 'tel', autocomplete: 'tel-national', placeholder: 'Phone number', value: p.number || '' });
-      input.addEventListener('input', () => { input.value = input.value.replace(/[^\d\s-]/g, ''); setValue('phone', { ...state.values.phone, number: input.value.trim() }); });
-      const picker = countryPicker({ value: p.iso, dial: true, label: 'Code', onChange: code => setValue('phone', { ...state.values.phone, iso: code, dial: byCode[code].dial }) });
+      const p = val || newPhone();
+      const input = h('input', { ...common, type: 'tel', inputmode: 'tel', autocomplete: key === 'phone' ? 'tel-national' : 'off', placeholder: 'Phone number', value: p.number || '' });
+      input.addEventListener('input', () => { input.value = input.value.replace(/[^\d\s-]/g, ''); b.set({ ...(b.get() || newPhone()), number: input.value.trim() }); });
+      const picker = countryPicker({ value: p.iso, dial: true, label: 'Code', onChange: code => b.set({ ...(b.get() || newPhone()), iso: code, dial: byCode[code].dial }) });
       wrap.append(h('div', { class: 'phone' }, picker, input)); break;
     }
     case 'choice': {
       const group = h('div', { class: 'choices', role: 'radiogroup', 'aria-label': f.label, id });
       f.options.forEach(o => {
-        const input = h('input', { type: 'radio', name: f.name, value: o, checked: v[f.name] === o });
-        input.addEventListener('change', () => setValue(f.name, o, true));
+        const input = h('input', { type: 'radio', name: key, value: o, checked: val === o });
+        input.addEventListener('change', () => b.set(o, true));
         group.append(h('label', { class: 'pill' }, input, h('span', {}, o)));
       });
       labelEl.removeAttribute('for');
@@ -185,15 +212,15 @@ function fieldEl(f) {
     case 'cards': {
       const group = h('div', { class: 'cards', role: 'radiogroup', 'aria-label': f.label, id });
       f.options.forEach(o => {
-        const input = h('input', { type: 'radio', name: f.name, value: o.value, checked: v[f.name] === o.value });
-        input.addEventListener('change', () => setValue(f.name, o.value, true));
+        const input = h('input', { type: 'radio', name: key, value: o.value, checked: val === o.value });
+        input.addEventListener('change', () => b.set(o.value, true));
         group.append(h('label', { class: 'opt-card' }, input, h('div', { class: 'box' }, h('b', {}, o.title), h('span', {}, o.text), o.meta ? h('small', {}, o.meta) : null)));
       });
       labelEl.removeAttribute('for');
       wrap.append(group); break;
     }
     case 'file': {
-      const file = files[f.name];
+      const file = files[key];
       const drop = h('div', { class: `drop${file ? ' has' : ''}` });
       const input = h('input', { ...common, type: 'file', accept: '.pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png' });
       const icon = file
@@ -202,15 +229,15 @@ function fieldEl(f) {
       drop.append(h('div', { class: 'ico', html: icon }));
       if (file) {
         drop.append(h('div', { class: 'txt' }, h('b', { class: 'fname' }, file.name), h('span', {}, file.size < 1048576 ? `${Math.max(1, Math.round(file.size / 1024))} KB` : `${(file.size / 1048576).toFixed(1)} MB`)),
-          h('button', { type: 'button', class: 'remove', onclick: () => { delete files[f.name]; setValue(f.name, null, true); } }, 'Remove'));
+          h('button', { type: 'button', class: 'remove', onclick: () => { delete files[key]; b.set(null, true); } }, 'Remove'));
       } else {
         drop.append(h('div', { class: 'txt' }, h('b', {}, 'Choose a file or drag it here'), h('span', {}, f.hint || `PDF, JPG or PNG, up to ${MAX_FILE_MB} MB`)), input);
       }
       const take = fl => {
         if (!fl) return;
-        if (!FILE_TYPES.includes(fl.type)) return showError(f.name, 'Please upload a PDF, JPG or PNG file.');
-        if (fl.size > MAX_FILE_MB * 1048576) return showError(f.name, `This file is larger than ${MAX_FILE_MB} MB.`);
-        files[f.name] = fl; setValue(f.name, { name: fl.name, size: fl.size }, true);
+        if (!FILE_TYPES.includes(fl.type)) return showError(key, 'Please upload a PDF, JPG or PNG file.');
+        if (fl.size > MAX_FILE_MB * 1048576) return showError(key, `This file is larger than ${MAX_FILE_MB} MB.`);
+        files[key] = fl; b.set({ name: fl.name, size: fl.size }, true);
       };
       input.addEventListener('change', () => take(input.files[0]));
       ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
@@ -220,10 +247,69 @@ function fieldEl(f) {
       wrap.append(drop); break;
     }
   }
-  if (f.hint && (req || f.type === 'file') && f.type !== 'file') wrap.append(h('p', { class: 'hint' }, f.hint));
-  wrap.append(h('p', { class: 'error', id: `${id}_err`, role: 'alert' }, errors[f.name] || ''));
-  if (errors[f.name]) wrap.classList.add('invalid');
+  if (f.hint && req && f.type !== 'file') wrap.append(h('p', { class: 'hint' }, f.hint));
+  wrap.append(h('p', { class: 'error', id: `${id}_err`, role: 'alert' }, errors[key] || ''));
+  if (errors[key]) wrap.classList.add('invalid');
   return wrap;
+}
+
+// ---------- repeatable groups (owners, signatories, contacts, representatives) ----------
+function ensureItems(g) {
+  if (!Array.isArray(state.values[g.name])) state.values[g.name] = [];
+  while (state.values[g.name].length < (g.min || 1)) state.values[g.name].push(newItem(g));
+  return state.values[g.name];
+}
+function removeItem(g, i) {
+  state.values[g.name].splice(i, 1);
+  // Shift uploaded files of later people down by one.
+  const prefix = `${g.name}.`;
+  const moved = {};
+  for (const k of Object.keys(files)) {
+    if (!k.startsWith(prefix)) continue;
+    const [, idx, sub] = k.split('.');
+    const n = +idx;
+    if (n === i) { delete files[k]; continue; }
+    if (n > i) { moved[`${g.name}.${n - 1}.${sub}`] = files[k]; delete files[k]; }
+  }
+  Object.assign(files, moved);
+  for (const k of Object.keys(errors)) if (k.startsWith(prefix) || k === g.name) delete errors[k];
+  save(); renderPanel(false);
+}
+function shareTotal() {
+  return (state.values.owners || []).reduce((a, it) => a + (parseFloat(it.share) || 0), 0);
+}
+function updateTotals() {
+  const el = document.querySelector('[data-total="owners"]');
+  if (!el) return;
+  const t = +shareTotal().toFixed(2);
+  el.textContent = `Total: ${t}%`;
+  el.className = `total ${Math.abs(t - 100) < 0.01 ? 'ok' : t > 100 ? 'over' : ''}`;
+}
+function groupEl(g) {
+  const items = ensureItems(g);
+  const box = h('div', { class: 'group field', 'data-field': g.name });
+  box.append(h('div', { class: 'group-head' }, h('h3', {}, g.label, h('span', { class: 'req', 'aria-hidden': 'true' }, '*')), g.hint ? h('p', {}, g.hint) : null));
+  items.forEach((it, i) => {
+    const card = h('div', { class: 'person' },
+      h('div', { class: 'person-head' },
+        h('span', { class: 'badge' }, String(i + 1)),
+        h('b', {}, `${g.itemLabel} ${i + 1}`),
+        items.length > (g.min || 1) ? h('button', { type: 'button', class: 'link-remove', onclick: () => removeItem(g, i) }, 'Remove') : null),
+      h('div', { class: 'grid' }, ...g.fields.map(sf => fieldEl(sf, itemBinding(g, i, sf)))));
+    box.append(card);
+  });
+  const foot = h('div', { class: 'group-foot' },
+    h('button', { type: 'button', class: 'btn-add', onclick: () => {
+      items.push(newItem(g)); delete errors[g.name]; save(); renderPanel(false);
+      const cards = document.querySelectorAll(`[data-field="${g.name}"] .person`);
+      const last = cards[cards.length - 1];
+      if (last) { last.classList.add('reveal'); last.scrollIntoView({ behavior: 'smooth', block: 'center' }); const inp = last.querySelector('input'); inp && inp.focus({ preventScroll: true }); }
+    } }, h('span', { 'aria-hidden': 'true' }, '+'), g.addLabel),
+    g.name === 'owners' ? h('span', { 'data-total': 'owners', class: 'total' }) : null);
+  box.append(foot);
+  box.append(h('p', { class: 'error', role: 'alert' }, errors[g.name] || ''));
+  if (errors[g.name]) box.classList.add('invalid');
+  return box;
 }
 
 function showError(name, msg) {
@@ -232,15 +318,24 @@ function showError(name, msg) {
   if (el) { el.classList.add('invalid'); $('.error', el).textContent = msg; }
 }
 
-// Extra checks the shared schema cannot do (phone parsing, dates).
+// Extra checks the shared schema cannot do (phone numbers, dates relative to today).
 function extraChecks(sectionId) {
   const e = {};
   const v = state.values;
-  if (sectionId === 'contact' && v.phone && v.phone.number) {
-    const p = parsePhoneNumberFromString(v.phone.number, v.phone.iso);
-    if (!p || !p.isValid()) e.phone = 'Please check the phone number and country code.';
+  const checkPhone = (key, p) => {
+    if (!p || !p.number) return;
+    const n = parsePhoneNumberFromString(p.number, p.iso);
+    if (!n || !n.isValid()) e[key] = 'Please check the phone number and country code.';
+  };
+  for (const s of SECTIONS) {
+    if (sectionId && s.id !== sectionId) continue;
+    for (const f of s.fields) {
+      if (!isShown(f, v)) continue;
+      if (f.type === 'phone') checkPhone(f.name, v[f.name]);
+      if (f.type === 'group') (v[f.name] || []).forEach((it, i) => f.fields.forEach(sf => { if (sf.type === 'phone') checkPhone(`${f.name}.${i}.${sf.name}`, it[sf.name]); }));
+    }
   }
-  if (sectionId === 'company') {
+  if (!sectionId || sectionId === 'company') {
     const today = new Date().toISOString().slice(0, 10);
     if (v.tradeLicenceExpiry && v.tradeLicenceExpiry < today) e.tradeLicenceExpiry = 'This date has passed. Please use the expiry date of your current licence.';
     if (v.establishmentDate && v.establishmentDate > today) e.establishmentDate = 'The establishment date cannot be in the future.';
@@ -275,12 +370,13 @@ function renderPanel(fresh = true) {
   const box = h('div', { class: fresh ? 'panel' : '' },
     h('div', { class: 'panel-head' }, h('h2', {}, section.title), h('p', {}, section.subtitle)),
     h('div', { class: 'grid' }, ...shown.map(f => {
-      const el = fieldEl(f);
+      const el = f.type === 'group' ? groupEl(f) : fieldEl(f);
       if (!fresh && !visibleBefore.has(f.name)) el.classList.add('reveal');
       return el;
     })));
   visibleBefore = new Set(shown.map(f => f.name));
   panel.replaceChildren(box);
+  updateTotals();
   if (!fresh && active) { const el = panel.querySelector(`input[name="${active}"]:checked, [name="${active}"]`); el && el.focus({ preventScroll: true }); }
   renderSteps();
 }
@@ -290,7 +386,8 @@ function renderReview(fresh) {
   const rows = summaryRows(v, countryName);
   const secs = SECTIONS.map((s, i) => {
     const items = s.id === 'documents'
-      ? s.fields.filter(f => isShown(f, v)).map(f => ({ label: f.label, value: files[f.name] ? files[f.name].name : '' }))
+      ? [...s.fields.filter(f => isShown(f, v)).map(f => ({ label: f.label, value: files[f.name] ? files[f.name].name : '' })),
+         ...groupFileList(v).map(d => ({ label: d.label, value: files[d.key] ? files[d.key].name : '' }))]
       : rows.filter(r => r.section === s.title);
     return h('section', { class: 'review-sec' },
       h('header', {}, h('h3', {}, s.title), h('button', { type: 'button', class: 'edit', onclick: () => go(i) }, 'Edit')),
@@ -303,6 +400,17 @@ function renderReview(fresh) {
     h('div', { class: 'panel-head' }, h('h2', {}, 'Review and submit'), h('p', {}, 'Please check your answers before submitting.')),
     ...secs, declare, h('div', { id: 'status' })));
   renderSteps();
+}
+
+function groupFileList(v) {
+  const out = [];
+  for (const s of SECTIONS) for (const g of s.fields) {
+    if (g.type !== 'group') continue;
+    groupItems(v, g).forEach((it, i) => g.fields.forEach(sf => {
+      if (sf.type === 'file') out.push({ key: `${g.name}.${i}.${sf.name}`, label: `${sf.label} (${it.fullName || it.name || `${g.itemLabel} ${i + 1}`})` });
+    }));
+  }
+  return out;
 }
 
 function go(i) {
@@ -328,8 +436,9 @@ async function submit() {
   const v = state.values;
   const all = { ...validate(v), ...extraChecks('contact'), ...extraChecks('company') };
   for (const s of SECTIONS) for (const f of s.fields) if (f.type === 'file' && isShown(f, v) && isRequired(f, v) && !files[f.name]) all[f.name] = 'Please attach this document.';
+  groupFileList(v).forEach(d => { if (!files[d.key]) all[d.key] = 'Please attach this document.'; });
   if (Object.keys(all).length) {
-    const idx = SECTIONS.findIndex(s => s.fields.some(f => all[f.name]));
+    const idx = SECTIONS.findIndex(s => s.fields.some(f => Object.keys(all).some(k => k === f.name || k.startsWith(`${f.name}.`))));
     go(idx); errors = all; renderPanel(false); return;
   }
   if (!v.declaration) { errors.declaration = true; $('.declare').classList.add('invalid'); $('.declare').scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
@@ -338,7 +447,8 @@ async function submit() {
   btn.disabled = true; $('#back').disabled = true;
   btn.replaceChildren(h('span', { class: 'spin' }), 'Submitting');
   try {
-    const toSend = Object.entries(files).filter(([name]) => SECTIONS.some(s => s.fields.some(f => f.name === name && isShown(f, v))));
+    const groupKeys = new Set(groupFileList(v).map(d => d.key));
+    const toSend = Object.entries(files).filter(([name]) => groupKeys.has(name) || SECTIONS.some(s => s.fields.some(f => f.name === name && isShown(f, v))));
     const total = toSend.reduce((a, [, f]) => a + f.size, 0) || 1;
     const loaded = {};
     const bar = h('span');
