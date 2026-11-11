@@ -17,3 +17,11 @@ Static form (public/) with two Vercel functions (api/). Questions live in lib/sc
 ## Local build
 
 npm install && npm run build
+
+## Submission PDF
+
+Each submission produces a CompuAge-branded PDF (lib/pdf.js):
+- Email to MAIL_TO: one combined PDF with every answer, the declaration and the uploaded documents as annexes.
+- Supplier copy: the same PDF without the annexes.
+
+Fonts in lib/assets are Inter (SIL Open Font License), converted to TrueType and subset to Latin, Greek and Cyrillic.
