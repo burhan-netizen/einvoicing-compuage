@@ -35,7 +35,8 @@ a { color: var(--brand); }
 .hero { margin-bottom: 26px; }
 .eyebrow { display: inline-block; margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--brand); }
 .hero h1 { margin: 0 0 10px; font-size: clamp(26px, 4.4vw, 36px); line-height: 1.15; letter-spacing: -.02em; font-weight: 800; }
-.lede { margin: 0; color: var(--ink-2); font-size: 15.5px; max-width: 680px; }
+.lede { margin: 0; color: var(--ink-2); font-size: 15.5px; max-width: 700px; }
+.lede + .lede { margin-top: 10px; }
 .facts { list-style: none; padding: 0; margin: 20px 0 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .facts li { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 13px; color: var(--muted); display: flex; flex-direction: column; }
 .facts b { color: var(--ink); font-size: 14px; }
