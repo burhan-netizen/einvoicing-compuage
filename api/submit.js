@@ -28,7 +28,7 @@ function emailHtml({ origin, eyebrow, title, intro, facts, note }) {
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f5f3;padding:28px 12px"><tr><td align="center">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:580px;background:#ffffff;border:1px solid #e7e5e2;border-radius:14px;overflow:hidden">
       <tr><td style="height:4px;background:linear-gradient(90deg,#e2231a,#ef5a1e,#f9a51a);background-color:#ef5a1e"></td></tr>
-      <tr><td style="padding:24px 28px 6px"><img src="${origin}/compuage-logo.png" alt="CompuAge Computers L.L.C." height="38" style="display:block;height:38px;width:auto"></td></tr>
+      <tr><td style="padding:24px 28px 6px"><img src="${origin}/compuage-logo.png" alt="CompuAge Computers L.L.C." height="38" style="display:block;height:38px;width:auto"><div style="margin-top:6px;font-size:11.5px;font-weight:700;color:#7a7a7a">TRN: 100274488400003</div></td></tr>
       <tr><td style="padding:14px 28px 0">
         <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#ef5a1e">${esc(eyebrow)}</p>
         <h1 style="margin:0 0 10px;font-size:20px;line-height:1.3">${esc(title)}</h1>
