@@ -1,14 +1,14 @@
 import { upload } from '@vercel/blob/client';
 import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
 import { COUNTRIES } from './countries.js';
-import { SECTIONS, DECLARATION, MAX_FILE_MB, FILE_TYPES, isShown, isRequired, validate, summaryRows, groupItems } from '../lib/schema.js';
+import { SECTIONS, DECLARATION, MAX_FILE_MB, FILE_TYPES, isShown, isRequired, validate, summaryRows, groupItems, docSlots, docRows } from '../lib/schema.js';
 
 const STORE_KEY = 'compuage-supplier-v1';
 const POPULAR = ['AE', 'SA', 'OM', 'QA', 'KW', 'BH', 'IN'];
 const byCode = Object.fromEntries(COUNTRIES.map(c => [c.code, c]));
 const countryName = code => (byCode[code] ? byCode[code].name : code);
 const STEPS = [...SECTIONS.map(s => ({ id: s.id, title: s.title })), { id: 'review', title: 'Review and submit' }];
-const SHORT = { company: 'Company', ownership: 'Ownership', contact: 'Contacts', tax: 'VAT and tax', einvoicing: 'e-Invoicing', documents: 'Documents', review: 'Review' };
+const SHORT = { company: 'Company', ownership: 'Owners', accounts: 'Accounts', tax: 'VAT and tax', einvoicing: 'e-Invoicing', documents: 'Documents', review: 'Review' };
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
@@ -30,7 +30,7 @@ const flagImg = code => h('img', { class: 'flag', src: `https://flagcdn.com/w40/
 const PREVIEW = typeof window !== 'undefined' && window.__PREVIEW__ === true;
 
 // ---------- state ----------
-let state = { values: { phone: { iso: 'AE', dial: '971', number: '' } }, step: 0, reached: 0 };
+let state = { values: { mobile: { iso: 'AE', dial: '971', number: '' }, landline: { iso: 'AE', dial: '971', number: '' }, docs: {} }, step: 0, reached: 0 };
 const files = {};
 try {
   const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
@@ -41,6 +41,8 @@ for (const s of SECTIONS) for (const f of s.fields) {
   if (f.type === 'file') delete state.values[f.name];
   if (f.type === 'group' && Array.isArray(state.values[f.name])) state.values[f.name].forEach(it => f.fields.forEach(sf => { if (sf.type === 'file') it[sf.name] = null; }));
 }
+if (!state.values.docs || typeof state.values.docs !== 'object') state.values.docs = {};
+Object.values(state.values.docs).forEach(d => { if (d) d.files = []; });
 const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* ignore */ } };
 
 let errors = {};
@@ -130,7 +132,7 @@ const newItem = g => Object.fromEntries(g.fields.map(sf => [sf.name, sf.type ===
 const topBinding = f => ({ key: f.name, get: () => state.values[f.name], set: (v, r) => setValue(f.name, v, r) });
 const itemBinding = (g, i, sf) => {
   const key = `${g.name}.${i}.${sf.name}`;
-  return { key, get: () => state.values[g.name][i][sf.name], set: (v, r) => { state.values[g.name][i][sf.name] = v; clearError(key); save(); if (r) renderPanel(false); } };
+  return { key, item: () => state.values[g.name][i], get: () => state.values[g.name][i][sf.name], set: (v, r) => { state.values[g.name][i][sf.name] = v; clearError(key); save(); if (r) renderPanel(false); } };
 };
 
 function fieldEl(f, b = topBinding(f)) {
@@ -140,6 +142,13 @@ function fieldEl(f, b = topBinding(f)) {
   const req = isRequired(f, v);
   const wrap = h('div', { class: `field${f.half ? ' half' : ''}`, 'data-field': key });
   const id = `f_${key.replace(/\./g, '_')}`;
+  if (f.type === 'checkbox') {
+    const cb = h('input', { type: 'checkbox', id, checked: !!val });
+    cb.addEventListener('change', () => b.set(cb.checked, true));
+    wrap.classList.add('check');
+    wrap.append(h('label', { class: 'checkline', for: id }, cb, h('span', {}, f.label)));
+    return wrap;
+  }
   const labelEl = h('label', { class: 'label', for: id }, f.label, req ? h('span', { class: 'req', 'aria-hidden': 'true' }, '*') : (f.type !== 'file' && !f.hint ? h('span', { class: 'opt' }, 'Optional') : null));
   if (f.hint && !req && f.type !== 'file') labelEl.append(h('span', { class: 'opt' }, f.hint));
   wrap.append(labelEl);
@@ -177,6 +186,11 @@ function fieldEl(f, b = topBinding(f)) {
         ...opts.map(o => h('option', { value: o, selected: val === o }, o)));
       sel.addEventListener('change', () => {
         if (f.onChange) Object.assign(state.values, f.onChange(sel.value, state.values));
+        if (f.name === 'ownerRef' && b.item) {
+          const it = b.item();
+          const o = (state.values.owners || []).find(x => String(x.fullName || '').trim() === sel.value);
+          if (o) { it.fullName = o.fullName; if (o.nationality) it.nationality = o.nationality; if (o.phone && o.phone.number && !(it.phone && it.phone.number)) it.phone = { ...o.phone }; if (o.email && !it.email) it.email = o.email; }
+        }
         b.set(sel.value, true);
       });
       wrap.append(sel); break;
@@ -184,9 +198,8 @@ function fieldEl(f, b = topBinding(f)) {
     case 'country': {
       const top = key === f.name;
       wrap.append(countryPicker({ value: val, label: top ? 'Select a country' : 'Select nationality', onChange: code => {
-        if (top) {
-          const p = state.values.phone;
-          if (p && !p.number && byCode[code]) state.values.phone = { ...p, iso: code, dial: byCode[code].dial };
+        if (top && byCode[code]) {
+          ['mobile', 'landline'].forEach(k => { const p = state.values[k]; if (!p || !p.number) state.values[k] = { iso: code, dial: byCode[code].dial, number: '' }; });
         }
         b.set(code, top);
       } }));
@@ -272,6 +285,15 @@ function removeItem(g, i) {
     if (n > i) { moved[`${g.name}.${n - 1}.${sub}`] = files[k]; delete files[k]; }
   }
   Object.assign(files, moved);
+  const docs = state.values.docs || {}, movedDocs = {};
+  for (const k of Object.keys(docs)) {
+    if (!k.startsWith(prefix)) continue;
+    const [, idx, sub] = k.split('.');
+    const n = +idx;
+    if (n === i) { delete docs[k]; continue; }
+    if (n > i) { movedDocs[`${g.name}.${n - 1}.${sub}`] = docs[k]; delete docs[k]; }
+  }
+  Object.assign(docs, movedDocs);
   for (const k of Object.keys(errors)) if (k.startsWith(prefix) || k === g.name) delete errors[k];
   save(); renderPanel(false);
 }
@@ -295,7 +317,7 @@ function groupEl(g) {
         h('span', { class: 'badge' }, String(i + 1)),
         h('b', {}, `${g.itemLabel} ${i + 1}`),
         items.length > (g.min || 1) ? h('button', { type: 'button', class: 'link-remove', onclick: () => removeItem(g, i) }, 'Remove') : null),
-      h('div', { class: 'grid' }, ...g.fields.map(sf => fieldEl(sf, itemBinding(g, i, sf)))));
+      h('div', { class: 'grid' }, ...g.fields.filter(sf => !sf.showIf || sf.showIf(state.values, it)).map(sf => fieldEl(sf, itemBinding(g, i, sf)))));
     box.append(card);
   });
   const foot = h('div', { class: 'group-foot' },
@@ -310,6 +332,93 @@ function groupEl(g) {
   box.append(h('p', { class: 'error', role: 'alert' }, errors[g.name] || ''));
   if (errors[g.name]) box.classList.add('invalid');
   return box;
+}
+
+// ---------- documents (company + every person in sections 3, 4 and 5) ----------
+const fileMeta = fl => ({ name: fl.name, size: fl.size });
+const sizeText = n => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
+const ICON_OK = '<svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_UP = '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>';
+
+function docState(key) {
+  const docs = state.values.docs || (state.values.docs = {});
+  return docs[key] || (docs[key] = { files: [], na: false, reason: '' });
+}
+function slotDone(slot) {
+  const d = (state.values.docs || {})[slot.key];
+  return !!((files[slot.key] || []).length || (slot.allowNA && d && d.na && String(d.reason || '').trim()));
+}
+function docSlotEl(slot) {
+  const key = slot.key, errKey = `docs.${key}`;
+  const d = docState(key);
+  const list = files[key] || (files[key] = []);
+  const sync = () => { d.files = list.map(fileMeta); clearError(errKey); save(); };
+  const el = h('div', { class: 'field doc-slot', 'data-field': errKey });
+  el.append(h('div', { class: 'label' }, slot.label, slot.required ? h('span', { class: 'req', 'aria-hidden': 'true' }, '*') : h('span', { class: 'opt' }, 'Optional')));
+  if (slot.hint) el.append(h('p', { class: 'hint', style: 'margin:-2px 0 8px' }, slot.hint));
+
+  if (!d.na) {
+    list.forEach((fl, n) => el.append(h('div', { class: 'drop has' },
+      h('div', { class: 'ico', html: ICON_OK }),
+      h('div', { class: 'txt' }, h('b', { class: 'fname' }, fl.name), h('span', {}, sizeText(fl.size))),
+      h('button', { type: 'button', class: 'remove', onclick: () => { list.splice(n, 1); sync(); renderPanel(false); } }, 'Remove'))));
+    if (list.length < (slot.max || 1)) {
+      const input = h('input', { type: 'file', 'aria-label': slot.label, accept: '.pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png', multiple: (slot.max || 1) > 1 ? true : null });
+      const title = list.length ? 'Add the back side' : 'Choose a file or drag it here';
+      const sub = (slot.max || 1) > 1 ? 'Front and back as two photos, or one PDF with both sides' : `PDF, JPG or PNG, up to ${MAX_FILE_MB} MB`;
+      const drop = h('div', { class: 'drop' }, h('div', { class: 'ico', html: ICON_UP }), h('div', { class: 'txt' }, h('b', {}, title), h('span', {}, sub)), input);
+      const take = fls => {
+        for (const fl of [...fls]) {
+          if (list.length >= (slot.max || 1)) break;
+          if (!FILE_TYPES.includes(fl.type)) return showError(errKey, 'Please upload a PDF, JPG or PNG file.');
+          if (fl.size > MAX_FILE_MB * 1048576) return showError(errKey, `This file is larger than ${MAX_FILE_MB} MB.`);
+          list.push(fl);
+        }
+        sync(); renderPanel(false);
+      };
+      input.addEventListener('change', () => take(input.files));
+      ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+      ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+      drop.addEventListener('drop', e => take(e.dataTransfer.files));
+      el.append(drop);
+    }
+  }
+  if (slot.allowNA) {
+    const cb = h('input', { type: 'checkbox', checked: !!d.na });
+    cb.addEventListener('change', () => { d.na = cb.checked; if (cb.checked) { list.length = 0; d.files = []; } clearError(errKey); save(); renderPanel(false); });
+    el.append(h('label', { class: 'checkline na' }, cb, h('span', {}, 'Not applicable')));
+    if (d.na) {
+      const r = h('input', { type: 'text', class: 'input', value: d.reason || '', placeholder: 'Reason, for example: UAE national, no visa required', 'aria-label': 'Reason' });
+      r.addEventListener('input', () => { d.reason = r.value; clearError(errKey); save(); updateDocCount(); });
+      el.append(r);
+    }
+  }
+  el.append(h('p', { class: 'error', role: 'alert' }, errors[errKey] || ''));
+  if (errors[errKey]) el.classList.add('invalid');
+  return el;
+}
+function updateDocCount() {
+  const el = document.querySelector('[data-doc-count]');
+  if (!el) return;
+  const slots = docSlots(state.values).filter(s => s.required);
+  const done = slots.filter(slotDone).length;
+  el.textContent = `${done} of ${slots.length} required documents ready`;
+  el.className = `total ${done === slots.length ? 'ok' : ''}`;
+}
+function docsEl() {
+  const wrap = h('div', { class: 'field docs' });
+  wrap.append(h('div', { class: 'doc-summary' }, h('span', { 'data-doc-count': '1', class: 'total' })));
+  let current = null, box = null;
+  for (const slot of docSlots(state.values)) {
+    if (slot.group !== current) {
+      current = slot.group;
+      box = h('div', { class: 'doc-group' }, h('h3', {}, slot.group), h('div', { class: 'doc-grid' }));
+      wrap.append(box);
+    }
+    box.lastChild.append(docSlotEl(slot));
+  }
+  setTimeout(updateDocCount);
+  return wrap;
 }
 
 function showError(name, msg) {
@@ -370,7 +479,7 @@ function renderPanel(fresh = true) {
   const box = h('div', { class: fresh ? 'panel' : '' },
     h('div', { class: 'panel-head' }, h('h2', {}, section.title), h('p', {}, section.subtitle)),
     h('div', { class: 'grid' }, ...shown.map(f => {
-      const el = f.type === 'group' ? groupEl(f) : fieldEl(f);
+      const el = f.type === 'group' ? groupEl(f) : f.type === 'docs' ? docsEl() : fieldEl(f);
       if (!fresh && !visibleBefore.has(f.name)) el.classList.add('reveal');
       return el;
     })));
@@ -386,8 +495,7 @@ function renderReview(fresh) {
   const rows = summaryRows(v, countryName);
   const secs = SECTIONS.map((s, i) => {
     const items = s.id === 'documents'
-      ? [...s.fields.filter(f => isShown(f, v)).map(f => ({ label: f.label, value: files[f.name] ? files[f.name].name : '' })),
-         ...groupFileList(v).map(d => ({ label: d.label, value: files[d.key] ? files[d.key].name : '' }))]
+      ? docRows(v).map(r => ({ label: `${r.group}: ${r.label}`, value: r.value }))
       : rows.filter(r => r.section === s.title);
     return h('section', { class: 'review-sec' },
       h('header', {}, h('h3', {}, s.title), h('button', { type: 'button', class: 'edit', onclick: () => go(i) }, 'Edit')),
@@ -400,17 +508,6 @@ function renderReview(fresh) {
     h('div', { class: 'panel-head' }, h('h2', {}, 'Review and submit'), h('p', {}, 'Please check your answers before submitting.')),
     ...secs, declare, h('div', { id: 'status' })));
   renderSteps();
-}
-
-function groupFileList(v) {
-  const out = [];
-  for (const s of SECTIONS) for (const g of s.fields) {
-    if (g.type !== 'group') continue;
-    groupItems(v, g).forEach((it, i) => g.fields.forEach(sf => {
-      if (sf.type === 'file') out.push({ key: `${g.name}.${i}.${sf.name}`, label: `${sf.label} (${it.fullName || it.name || `${g.itemLabel} ${i + 1}`})` });
-    }));
-  }
-  return out;
 }
 
 function go(i) {
@@ -435,8 +532,6 @@ function checkStep() {
 async function submit() {
   const v = state.values;
   const all = { ...validate(v), ...extraChecks('contact'), ...extraChecks('company') };
-  for (const s of SECTIONS) for (const f of s.fields) if (f.type === 'file' && isShown(f, v) && isRequired(f, v) && !files[f.name]) all[f.name] = 'Please attach this document.';
-  groupFileList(v).forEach(d => { if (!files[d.key]) all[d.key] = 'Please attach this document.'; });
   if (Object.keys(all).length) {
     const idx = SECTIONS.findIndex(s => s.fields.some(f => Object.keys(all).some(k => k === f.name || k.startsWith(`${f.name}.`))));
     go(idx); errors = all; renderPanel(false); return;
@@ -447,30 +542,36 @@ async function submit() {
   btn.disabled = true; $('#back').disabled = true;
   btn.replaceChildren(h('span', { class: 'spin' }), 'Submitting');
   try {
-    const groupKeys = new Set(groupFileList(v).map(d => d.key));
-    const toSend = Object.entries(files).filter(([name]) => groupKeys.has(name) || SECTIONS.some(s => s.fields.some(f => f.name === name && isShown(f, v))));
+    const toSend = [];
+    for (const slot of docSlots(v)) {
+      const d = (v.docs || {})[slot.key];
+      if (d && d.na) continue;
+      (files[slot.key] || []).forEach((file, n) => toSend.push([slot.key, file, n]));
+    }
     const total = toSend.reduce((a, [, f]) => a + f.size, 0) || 1;
     const loaded = {};
     const bar = h('span');
     if (toSend.length) status.replaceChildren(h('div', { class: 'uploading' }, 'Uploading documents securely', h('div', { class: 'bar' }, bar)));
     const safe = (v.legalName || 'supplier').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'supplier';
-    const uploaded = await Promise.all(toSend.map(async ([field, file]) => {
+    const uploaded = await Promise.all(toSend.map(async ([field, file, n]) => {
       const ext = (file.name.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const id = `${field}-${n}`;
+      const progress = done => { loaded[id] = done; bar.style.width = `${Math.min(100, (Object.values(loaded).reduce((a, b) => a + b, 0) / total) * 100)}%`; };
       let blob;
       if (PREVIEW) {
-        for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 80)); loaded[field] = (file.size * i) / 10; bar.style.width = `${Math.min(100, (Object.values(loaded).reduce((a, b) => a + b, 0) / total) * 100)}%`; }
-        return { field, url: '', name: file.name, contentType: file.type, size: file.size };
+        for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 60)); progress((file.size * i) / 10); }
+        return { field, n, url: '', name: file.name, contentType: file.type, size: file.size };
       }
       try {
-        blob = await upload(`suppliers/${safe}/${field}.${ext}`, file, {
+        blob = await upload(`suppliers/${safe}/${id}.${ext}`, file, {
           access: 'public', handleUploadUrl: '/api/upload', contentType: file.type,
-          onUploadProgress: p => { loaded[field] = p.loaded; bar.style.width = `${Math.min(100, (Object.values(loaded).reduce((a, b) => a + b, 0) / total) * 100)}%`; },
+          onUploadProgress: p => progress(p.loaded),
         });
       } catch (e) {
         console.error(e);
         throw new Error('We could not upload your documents.');
       }
-      return { field, url: blob.url, name: file.name, contentType: file.type, size: file.size };
+      return { field, n, url: blob.url, name: file.name, contentType: file.type, size: file.size };
     }));
     status.replaceChildren(h('div', { class: 'uploading' }, 'Sending your details'));
     if (PREVIEW) {

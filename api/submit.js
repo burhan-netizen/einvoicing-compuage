@@ -1,11 +1,10 @@
-import { SECTIONS, GROUPS, validate, summaryRows, peopleRecords, groupItems } from '../lib/schema.js';
+import { SECTIONS, GROUPS, validate, summaryRows, peopleRecords, docSlots, docRows } from '../lib/schema.js';
 import { buildInternalPdf, buildSubmissionPdf } from '../lib/pdf.js';
 import { COUNTRIES } from '../src/countries.js';
 
 const byCode = Object.fromEntries(COUNTRIES.map(c => [c.code, c.name]));
 const countryName = code => byCode[code] || code;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const FILE_FIELDS = SECTIONS.flatMap(s => s.fields.filter(f => f.type === 'file'));
 const BLOB_HOST = /^https:\/\/[a-z0-9]+\.public\.blob\.vercel-storage\.com\//i;
 const FORM_NAME = 'UAE e-Invoicing (PEPPOL) Declaration';
 const safeFile = s => String(s).replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -60,20 +59,19 @@ export default async function handler(req, res) {
   const { values: raw = {}, files = [], hp } = req.body || {};
   if (hp) return res.status(200).json({ ok: true, ref: makeRef() }); // bot honeypot
 
-  // Server-side validation mirrors the browser. Document fields are judged only by what was actually uploaded.
-  const fileByField = Object.fromEntries((Array.isArray(files) ? files : []).map(f => [f.field, f]));
-  for (const up of Object.values(fileByField)) {
+  // Server-side validation mirrors the browser. Documents are judged only by what was actually uploaded.
+  const uploads = (Array.isArray(files) ? files : []).filter(f => f && typeof f.field === 'string');
+  for (const up of uploads) {
     if (!BLOB_HOST.test(String(up.url))) return res.status(400).json({ ok: false, error: 'Invalid document link.' });
   }
   const values = { ...raw };
-  for (const f of FILE_FIELDS) values[f.name] = fileByField[f.name] ? true : null;
-  // People groups: keep at most 50 per group, and judge their ID uploads by what was actually uploaded.
-  for (const g of GROUPS()) {
-    values[g.name] = (Array.isArray(raw[g.name]) ? raw[g.name] : []).slice(0, 50).map((it, i) => {
-      const item = { ...it };
-      g.fields.forEach(sf => { if (sf.type === 'file') item[sf.name] = fileByField[`${g.name}.${i}.${sf.name}`] ? true : null; });
-      return item;
-    });
+  for (const g of GROUPS()) values[g.name] = (Array.isArray(raw[g.name]) ? raw[g.name] : []).slice(0, 50);
+  const rawDocs = raw.docs && typeof raw.docs === 'object' ? raw.docs : {};
+  values.docs = {};
+  for (const slot of docSlots(values)) {
+    const mine = uploads.filter(u => u.field === slot.key).sort((x, y) => (x.n || 0) - (y.n || 0)).slice(0, slot.max || 1);
+    const d = rawDocs[slot.key] || {};
+    values.docs[slot.key] = { files: mine, na: !!(slot.allowNA && d.na && !mine.length), reason: String(d.reason || '').slice(0, 300) };
   }
   const errors = validate(values);
   if (!values.declaration) errors.declaration = 'Declaration not accepted';
@@ -88,22 +86,21 @@ export default async function handler(req, res) {
 
   // Download the uploaded documents once; they go inside the PDF as annexes.
   const documents = [];
-  const docSpecs = FILE_FIELDS.map(f => ({ key: f.name, label: f.label }));
-  for (const g of GROUPS()) groupItems(values, g).forEach((it, i) => g.fields.forEach(sf => {
-    if (sf.type === 'file') docSpecs.push({ key: `${g.name}.${i}.${sf.name}`, label: `${sf.label}: ${it.fullName || it.name || `${g.itemLabel} ${i + 1}`}` });
-  }));
-  for (const f of docSpecs) {
-    const up = fileByField[f.key];
-    if (!up) continue;
-    let bytes = null;
-    try {
-      const r = await fetch(up.url);
-      if (!r.ok) throw new Error(String(r.status));
-      bytes = new Uint8Array(await r.arrayBuffer());
-    } catch (e) { console.error('Document download failed', f.name, e.message); }
-    const ext = String(up.url).split('?')[0].split('.').pop().toLowerCase();
-    const contentType = ext === 'pdf' ? 'application/pdf' : ext === 'png' ? 'image/png' : 'image/jpeg';
-    documents.push({ field: f.key, label: f.label, name: up.name || `${f.label}.${ext}`, url: up.url, ext, contentType, bytes });
+  for (const slot of docSlots(values)) {
+    const d = values.docs[slot.key];
+    const label = `${slot.group}: ${slot.label}`;
+    if (d.na) { documents.push({ field: slot.key, label, name: `Not applicable: ${d.reason}`, na: true }); continue; }
+    for (const [n, up] of d.files.entries()) {
+      let bytes = null;
+      try {
+        const r = await fetch(up.url);
+        if (!r.ok) throw new Error(String(r.status));
+        bytes = new Uint8Array(await r.arrayBuffer());
+      } catch (e) { console.error('Document download failed', slot.key, e.message); }
+      const ext = String(up.url).split('?')[0].split('.').pop().toLowerCase();
+      const contentType = ext === 'pdf' ? 'application/pdf' : ext === 'png' ? 'image/png' : 'image/jpeg';
+      documents.push({ field: slot.key, label: d.files.length > 1 ? `${label} (${n + 1} of ${d.files.length})` : label, name: up.name || `${slot.label}.${ext}`, url: up.url, ext, contentType, bytes });
+    }
   }
 
   // Build the PDFs. If anything goes wrong here, the email still goes out with the original documents.
@@ -113,14 +110,14 @@ export default async function handler(req, res) {
     internal = await buildInternalPdf({ ref, submittedAt, values, rows, documents });
   } catch (e) { console.error('Internal PDF failed', e); }
   try {
-    supplierPdf = (await buildSubmissionPdf({ ref, submittedAt, values, rows, documents: documents.map(({ label, name }) => ({ label, name })), mode: 'supplier' })).bytes;
+    supplierPdf = (await buildSubmissionPdf({ ref, submittedAt, values, rows, documents: documents.map(({ label, name, na }) => ({ label, name, na })), mode: 'supplier' })).bytes;
   } catch (e) { console.error('Supplier PDF failed', e); }
 
   const attachments = [];
   if (internal) attachments.push({ filename: `${baseName}.pdf`, content: Buffer.from(internal.bytes).toString('base64') });
   // Any document that could not be merged into the PDF (or every document, if the PDF failed) is attached as is.
   documents.forEach((d, i) => {
-    const merged = internal && internal.documents[i] && !/separately/.test(internal.documents[i].note);
+    const merged = d.na || (internal && internal.documents[i] && !/separately/.test(internal.documents[i].note));
     if (!merged && d.bytes) attachments.push({ filename: safeFile(`${legalName} - ${d.label}.${d.ext}`), content: Buffer.from(d.bytes).toString('base64') });
   });
 
@@ -135,7 +132,9 @@ export default async function handler(req, res) {
     ['e-Invoicing phase', val('phase')],
     ['Authorised signatory', (values.signatories || []).map(x => `${x.fullName}, ${x.designation}`).join('; ')],
     ['Primary contact', `${val('contactName')}, ${val('designation')}`],
-    ['Email / phone', `${val('email')}  |  ${val('phone')}`],
+    ['Documents', `${documents.filter(d => !d.na).length} files attached${documents.some(d => d.na) ? `, ${documents.filter(d => d.na).length} marked not applicable` : ''}`],
+    ['Company email / mobile', `${val('companyEmail')}  |  ${val('mobile')}`],
+    ['Primary contact email', val('email')],
   ];
 
   try {
@@ -160,15 +159,14 @@ export default async function handler(req, res) {
   if (process.env.SHEET_WEBHOOK_URL) {
     const record = { Reference: ref, 'Submitted at (UAE)': new Date(submittedAt).toLocaleString('en-GB', { timeZone: 'Asia/Dubai' }) };
     for (const s of SECTIONS) for (const f of s.fields) {
-      if (f.type === 'group') continue;
-      if (f.type === 'file') { const d = fileByField[f.name]; record[f.label] = d ? d.url : ''; continue; }
+      if (f.type === 'group' || f.type === 'docs') continue;
       // Some labels repeat across UAE and non-UAE variants of a question: keep whichever was answered.
       const row = rows.find(r => r.name === f.name);
       if (!record[f.label]) record[f.label] = row ? row.value : '';
     }
     const { cells, people } = peopleRecords(values, countryName);
     Object.assign(record, cells);
-    documents.filter(d => d.field.includes('.')).forEach(d => { record[d.label] = d.url; });
+    record.Documents = documents.map(d => `${d.label}: ${d.na ? d.name : d.url}`).join('\n');
     record['Declaration accepted'] = 'Yes';
     const peopleRows = people.map(p => ({ Reference: ref, Company: legalName, ...p }));
     tasks.push(fetch(process.env.SHEET_WEBHOOK_URL, {

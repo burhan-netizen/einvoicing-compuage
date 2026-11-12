@@ -9,7 +9,7 @@ export default async function handler(req, res) {
       body: req.body,
       request: req,
       onBeforeGenerateToken: async pathname => {
-        if (!/^suppliers\/[a-z0-9-]+\/(tradeLicenceFile|vatCertFile|ctCertFile|signatories\.\d{1,3}\.idFile)\.(pdf|jpg|jpeg|png)$/.test(pathname)) {
+        if (!/^suppliers\/[a-z0-9-]+\/(tradeLicenceFile|vatCertFile|ctCertFile|ejariFile|(owners|signatories|accountDept)\.\d{1,2}\.(passport|visa|eid))-\d\.(pdf|jpg|jpeg|png)$/.test(pathname)) {
           throw new Error('Invalid file name');
         }
         return {
