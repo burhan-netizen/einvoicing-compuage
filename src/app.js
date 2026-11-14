@@ -551,7 +551,9 @@ async function submit() {
     }
     const loaded = {};
     const bar = h('span');
-    if (toSend.length) status.replaceChildren(h('div', { class: 'uploading' }, 'Uploading documents securely', h('div', { class: 'bar' }, bar)));
+    const upText = h('span', {}, 'Preparing your documents');
+    if (toSend.length) status.replaceChildren(h('div', { class: 'uploading' }, upText, h('div', { class: 'bar' }, bar)));
+    let doneCount = 0;
     // Phone photos are shrunk first, so uploads are quick and storage stays small.
     const prepared = await Promise.all(toSend.map(async ([field, file, n]) => [field, await compressImage(file), n, file.name]));
     const total = prepared.reduce((a, [, f]) => a + f.size, 0) || 1;
@@ -562,7 +564,8 @@ async function submit() {
       ticket = await r.json().catch(() => null);
       if (!r.ok || !ticket || !ticket.url) throw new Error('We could not start the document upload.');
     }
-    const uploaded = await mapLimit(prepared, 3, async ([field, file, n, origName]) => {
+    upText.textContent = `Uploading documents securely (0 of ${prepared.length} done)`;
+    const uploaded = await mapLimit(prepared, 4, async ([field, file, n, origName]) => {
       const id = `${field}-${n}`;
       if (PREVIEW) {
         for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 60)); progress(id, (file.size * i) / 10); }
@@ -573,16 +576,20 @@ async function submit() {
         try { out = await uploadToDrive(ticket, field, n, file, origName, p => progress(id, p)); }
         catch (e) { console.error(e); if (attempt) throw new Error(`We could not upload your documents (${e.message}).`); }
       }
+      doneCount++; upText.textContent = `Uploading documents securely (${doneCount} of ${prepared.length} done)`;
       return { field, n, id: out, name: origName, contentType: file.type, size: file.size };
     });
-    status.replaceChildren(h('div', { class: 'uploading' }, 'Sending your details'));
+    const sendText = h('span', {}, 'Preparing your PDF');
+    status.replaceChildren(h('div', { class: 'uploading' }, sendText, h('div', { class: 'note' }, 'This can take up to a minute. Please keep this page open.')));
+    const sendTimer = setTimeout(() => { sendText.textContent = 'Sending your details to CompuAge'; }, 9000);
     if (PREVIEW) {
       await new Promise(r => setTimeout(r, 700));
       try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
       return showDone('CA-SUP-PREVIEW', v.email);
     }
     const res = await fetch('/api/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: v, files: uploaded, hp: $('#hp').value, invite: INVITE }) });
+      body: JSON.stringify({ values: v, files: uploaded, hp: $('#hp').value, invite: INVITE, folderId: (ticket && ticket.folder) || '' }) });
+    clearTimeout(sendTimer);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.error || 'Something went wrong while submitting.');
     try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
@@ -629,7 +636,7 @@ function fileToBase64(file) {
 
 async function uploadToDrive(ticket, field, n, file, origName, onProgress) {
   const base64 = await fileToBase64(file);
-  const body = JSON.stringify({ action: 'upload', session: ticket.session, exp: ticket.exp, sig: ticket.sig,
+  const body = JSON.stringify({ action: 'upload', session: ticket.session, exp: ticket.exp, sig: ticket.sig, folder: ticket.folder || '',
     slot: field, n, name: origName, mimeType: file.type, base64 });
   // Plain text body and no extra headers or progress listeners: a "simple" request, so the
   // browser sends no CORS preflight (Google Apps Script cannot answer one).

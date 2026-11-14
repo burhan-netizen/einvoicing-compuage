@@ -207,6 +207,7 @@ a { color: var(--brand); }
 .alert { margin-top: 16px; padding: 12px 14px; border-radius: 12px; background: #fdecea; color: var(--err); font-size: 14px; font-weight: 600; }
 .uploading { margin-top: 16px; font-size: 13.5px; color: var(--ink-2); }
 .uploading .bar { height: 6px; background: #eee; border-radius: 9px; overflow: hidden; margin-top: 8px; }
+.uploading .note { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
 .uploading .bar span { display: block; height: 100%; width: 0; background: var(--brand); transition: width .2s; }
 
 /* Success */

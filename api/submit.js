@@ -63,7 +63,7 @@ const ATTACH_LIMIT = 17 * 1024 * 1024;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
-  const { values: raw = {}, files = [], hp, invite, session } = req.body || {};
+  const { values: raw = {}, files = [], hp, invite, folderId } = req.body || {};
   if (hp) return res.status(200).json({ ok: true, ref: makeRef() }); // bot honeypot
 
   // Server-side validation mirrors the browser. Documents are judged only by what was actually uploaded.
@@ -211,7 +211,7 @@ export default async function handler(req, res) {
 
   try {
     await postToSheet({ record, people: peopleRows, emails, match,
-      folder: { name: safeFile(`${legalName} - ${ref}`), ids: documents.filter(d => d.driveId).map(d => d.driveId) },
+      folder: { name: safeFile(`${legalName} - ${ref}`), folderId: DRIVE_ID.test(String(folderId || '')) ? folderId : '', ids: documents.filter(d => d.driveId).map(d => d.driveId) },
       pdf: internal ? { name: `${baseName}.pdf`, base64: Buffer.from(internal.bytes).toString('base64') } : null });
     console.log('Submission logged and emailed', ref);
   } catch (e) {

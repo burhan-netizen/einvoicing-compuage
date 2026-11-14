@@ -94,6 +94,7 @@ function doPost(e) {
   if (data.action === 'upload') return handleUpload(data);
   if (SECRET && data.secret !== SECRET) return json({ ok: false, error: 'unauthorised' });
   if (data.action === 'file') return handleFile(data);
+  if (data.action === 'start') return handleStart(data);
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -106,10 +107,21 @@ function doPost(e) {
     let pdfFile = null, folder = null;
     try {
       if (data.folder) {
-        folder = docsFolder('Submissions').createFolder(String(data.folder.name || 'Submission').slice(0, 200));
-        (data.folder.ids || []).forEach(id => {
-          try { const f = DriveApp.getFileById(id); if (isOurUpload(f)) f.moveTo(folder); } catch (err) { notes.push('Move failed: ' + id); }
-        });
+        const name = String(data.folder.name || 'Submission').slice(0, 200);
+        // Fast path: the documents were uploaded straight into this submission's own folder,
+        // so it only needs a name and a move into "Submissions".
+        try {
+          if (data.folder.folderId) {
+            const f = DriveApp.getFolderById(data.folder.folderId);
+            if (String(f.getDescription() || '').indexOf('cmpg-session:') === 0) { f.setName(name); f.moveTo(docsFolder('Submissions')); folder = f; }
+          }
+        } catch (err) { notes.push('Folder move failed: ' + err); }
+        if (!folder) {
+          folder = docsFolder('Submissions').createFolder(name);
+          (data.folder.ids || []).forEach(id => {
+            try { const f = DriveApp.getFileById(id); if (isOurUpload(f)) f.moveTo(folder); } catch (err) { notes.push('Move failed: ' + id); }
+          });
+        }
         if (data.pdf && data.pdf.base64) pdfFile = folder.createFile(Utilities.newBlob(Utilities.base64Decode(data.pdf.base64), 'application/pdf', data.pdf.name));
       }
     } catch (err) { notes.push('Drive folder failed: ' + err); }
@@ -134,7 +146,7 @@ function doPost(e) {
     try {
       if (data.match && data.match.invite) record['Invite ID'] = data.match.invite;
       appendRecord(TAB.submissions, record);
-      (data.people || []).forEach(p => appendRecord(TAB.people, p));
+      appendRecords(TAB.people, data.people || []);
       if (data.match) markSubmitted(data.match);
     } catch (err) { notes.push('Logging failed: ' + err); }
 
@@ -155,16 +167,34 @@ const SLOT_RE = /^(tradeLicenceFile|vatCertFile|ctCertFile|ejariFile|(owners|sig
 // Browser upload: checked against a short-lived ticket signed by the website, then saved to Drive.
 function handleUpload(d) {
   try {
-    const expected = Utilities.computeHmacSha256Signature(d.session + '.' + d.exp, SECRET)
+    const signed = d.session + '.' + d.exp + (d.folder ? '.' + d.folder : '');
+    const expected = Utilities.computeHmacSha256Signature(signed, SECRET)
       .map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('');
     if (!d.sig || d.sig !== expected || Number(d.exp) < Date.now()) return json({ ok: false, error: 'Upload link expired. Please refresh the page and try again.' });
     if (!/^[a-f0-9]{10,40}$/.test(String(d.session)) || !SLOT_RE.test(String(d.slot)) || UPLOAD_TYPES.indexOf(d.mimeType) < 0) return json({ ok: false, error: 'File not accepted' });
     const bytes = Utilities.base64Decode(String(d.base64 || ''));
     if (!bytes.length || bytes.length > UPLOAD_MAX) return json({ ok: false, error: 'File is empty or larger than 10 MB' });
     const name = String(d.name || 'document').replace(/[\\/:*?"<>|]+/g, '').slice(0, 120);
-    const file = docsFolder('Incoming').createFile(Utilities.newBlob(bytes, d.mimeType, d.slot + '-' + (Number(d.n) || 0) + ' - ' + name));
+    let target = null;
+    if (d.folder) {
+      target = DriveApp.getFolderById(String(d.folder));
+      if (target.getDescription() !== 'cmpg-session:' + d.session) return json({ ok: false, error: 'File not accepted' });
+    }
+    const file = (target || docsFolder('Incoming')).createFile(Utilities.newBlob(bytes, d.mimeType, d.slot + '-' + (Number(d.n) || 0) + ' - ' + name));
     file.setDescription('cmpg-upload:' + d.session);
     return json({ ok: true, id: file.getId() });
+  } catch (err) {
+    return json({ ok: false, error: String(err) });
+  }
+}
+
+// Called by the website when someone starts uploading: one folder per submission.
+function handleStart(d) {
+  try {
+    if (!/^[a-f0-9]{10,40}$/.test(String(d.session))) return json({ ok: false, error: 'bad session' });
+    const f = docsFolder('Incoming').createFolder('In progress - ' + d.session);
+    f.setDescription('cmpg-session:' + d.session);
+    return json({ ok: true, folderId: f.getId() });
   } catch (err) {
     return json({ ok: false, error: String(err) });
   }
@@ -476,17 +506,23 @@ function recCols(sh) {
 
 function setCell(sh, row, col, header, value) { sh.getRange(row, col[header] + 1).setValue(value); }
 
-function appendRecord(name, record) {
+function appendRecord(name, record) { appendRecords(name, [record]); }
+
+// Adds any new column headers once, then writes all rows in a single call.
+function appendRecords(name, records) {
+  if (!records.length) return;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
   let headers = sheet.getLastColumn() ? sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0] : [];
-  const missing = Object.keys(record).filter(k => headers.indexOf(k) === -1);
+  const missing = [];
+  records.forEach(r => Object.keys(r).forEach(k => { if (headers.indexOf(k) === -1 && missing.indexOf(k) === -1) missing.push(k); }));
   if (missing.length) {
     sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
     headers = headers.concat(missing);
     styleHeader(sheet, headers.length);
   }
-  sheet.appendRow(headers.map(h => (record[h] == null ? '' : String(record[h]))));
+  const rows = records.map(r => headers.map(h => (r[h] == null ? '' : String(r[h]))));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
 function logSend(type, to, result, details) {
