@@ -8,7 +8,7 @@ const POPULAR = ['AE', 'SA', 'OM', 'QA', 'KW', 'BH', 'IN'];
 const byCode = Object.fromEntries(COUNTRIES.map(c => [c.code, c]));
 const countryName = code => (byCode[code] ? byCode[code].name : code);
 const STEPS = [...SECTIONS.map(s => ({ id: s.id, title: s.title })), { id: 'review', title: 'Review and submit' }];
-const SHORT = { company: 'Company', ownership: 'Owners', accounts: 'Accounts', tax: 'VAT and tax', einvoicing: 'e-Invoicing', documents: 'Documents', review: 'Review' };
+const SHORT = { company: 'Company', ownership: 'Owners', accounts: 'Accounts', tax: 'VAT and Tax', einvoicing: 'e-Invoicing', documents: 'Documents', review: 'Review' };
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
@@ -43,6 +43,8 @@ for (const s of SECTIONS) for (const f of s.fields) {
 }
 if (!state.values.docs || typeof state.values.docs !== 'object') state.values.docs = {};
 Object.values(state.values.docs).forEach(d => { if (d) d.files = []; });
+// Invitation emails link to the form with ?r=<id>, so the sheet can mark that recipient as submitted.
+const INVITE = (() => { try { return (new URLSearchParams(location.search).get('r') || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40); } catch { return ''; } })();
 const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* ignore */ } };
 
 let errors = {};
@@ -580,7 +582,7 @@ async function submit() {
       return showDone('CA-SUP-PREVIEW', v.email);
     }
     const res = await fetch('/api/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: v, files: uploaded, hp: $('#hp').value }) });
+      body: JSON.stringify({ values: v, files: uploaded, hp: $('#hp').value, invite: INVITE }) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.error || 'Something went wrong while submitting.');
     try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }

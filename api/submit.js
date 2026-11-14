@@ -45,18 +45,25 @@ function emailHtml({ origin, eyebrow, title, intro, facts, note }) {
   </td></tr></table></body></html>`;
 }
 
-async function sendEmail(payload) {
-  const r = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) throw new Error(`Email failed (${r.status}): ${await r.text()}`);
+// All email now goes out from CompuAge's own Google Workspace mailbox, through the Apps Script web app
+// attached to the onboarding Google Sheet. One call logs the submission and sends both emails.
+async function postToSheet(payload) {
+  const url = process.env.SHEET_WEBHOOK_URL;
+  if (!url) throw new Error('SHEET_WEBHOOK_URL is not set');
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret: process.env.SHEET_SECRET || '', ...payload }) });
+  const text = await r.text().catch(() => '');
+  let out = null;
+  try { out = JSON.parse(text); } catch { /* not JSON */ }
+  if (!r.ok || !out || !out.ok) throw new Error(`Sheet webhook failed (${r.status}): ${(out && out.error) || text.slice(0, 300)}`);
+  return out;
 }
+
+// Gmail accepts up to 25 MB of attachments per email (base64 counted). Bigger PDFs are shared as a link instead.
+const ATTACH_LIMIT = 17 * 1024 * 1024;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
-  const { values: raw = {}, files = [], hp } = req.body || {};
+  const { values: raw = {}, files = [], hp, invite } = req.body || {};
   if (hp) return res.status(200).json({ ok: true, ref: makeRef() }); // bot honeypot
 
   // Server-side validation mirrors the browser. Documents are judged only by what was actually uploaded.
@@ -114,15 +121,29 @@ export default async function handler(req, res) {
   } catch (e) { console.error('Supplier PDF failed', e); }
 
   const attachments = [];
-  if (internal) attachments.push({ filename: `${baseName}.pdf`, content: Buffer.from(internal.bytes).toString('base64') });
+  let bigPdfUrl = '';
+  if (internal && internal.bytes.length > ATTACH_LIMIT) {
+    try {
+      const { put } = await import('@vercel/blob');
+      const blob = await put(`submissions/${ref}/${baseName}.pdf`, Buffer.from(internal.bytes), { access: 'public', contentType: 'application/pdf', addRandomSuffix: true });
+      bigPdfUrl = blob.url;
+    } catch (e) { console.error('Large PDF upload failed', e.message); }
+  } else if (internal) {
+    attachments.push({ name: `${baseName}.pdf`, mimeType: 'application/pdf', base64: Buffer.from(internal.bytes).toString('base64') });
+  }
   // Any document that could not be merged into the PDF (or every document, if the PDF failed) is attached as is.
+  let attachedBytes = internal && !bigPdfUrl ? internal.bytes.length : 0;
+  const looseLinks = [];
   documents.forEach((d, i) => {
     const merged = d.na || (internal && internal.documents[i] && !/separately/.test(internal.documents[i].note));
-    if (!merged && d.bytes) attachments.push({ filename: safeFile(`${legalName} - ${d.label}.${d.ext}`), content: Buffer.from(d.bytes).toString('base64') });
+    if (merged || !d.bytes) return;
+    if (attachedBytes + d.bytes.length > ATTACH_LIMIT) { looseLinks.push(d); return; }
+    attachedBytes += d.bytes.length;
+    attachments.push({ name: safeFile(`${legalName} - ${d.label}.${d.ext}`), mimeType: d.contentType, base64: Buffer.from(d.bytes).toString('base64') });
   });
 
-  const from = process.env.MAIL_FROM || 'CompuAge Customer / Supplier Onboarding <onboarding@resend.dev>';
-  const to = (process.env.MAIL_TO || 'accounts@compuagedubai.com').split(',').map(s => s.trim()).filter(Boolean);
+  const to = (process.env.MAIL_TO || 'admin@compuagedubai.com').split(',').map(s => s.trim()).filter(Boolean);
+  const senderName = process.env.MAIL_SENDER_NAME || 'CompuAge Computers L.L.C.';
   const facts = [
     ['Reference', ref],
     ['Submitted', `${uaeTime(submittedAt)} (UAE)`],
@@ -137,63 +158,58 @@ export default async function handler(req, res) {
     ['Primary contact email', val('email')],
   ];
 
-  try {
-    await sendEmail({
-      from, to,
-      reply_to: String(values.email).trim(),
-      subject: `${legalName} | ${FORM_NAME} (${ref})`,
-      html: emailHtml({ origin, eyebrow: 'New customer / supplier submission', title: legalName, facts,
-        intro: `A customer / supplier has completed the ${FORM_NAME}. The key details are below.`,
-        note: internal
-          ? `The full submission is attached as one PDF: <b>${esc(baseName)}.pdf</b>. It contains every answer, the signed declaration and the supporting documents as annexes.`
-          : 'The supporting documents are attached. The summary PDF could not be generated this time, so please refer to the details above.' }),
-      attachments,
-    });
-  } catch (e) {
-    console.error(e);
-    return res.status(502).json({ ok: false, error: 'We could not send your submission right now.' });
-  }
-
-  // Everything below is best effort: the submission is already safely with CompuAge.
-  const tasks = [];
-  if (process.env.SHEET_WEBHOOK_URL) {
-    const record = { Reference: ref, 'Submitted at (UAE)': new Date(submittedAt).toLocaleString('en-GB', { timeZone: 'Asia/Dubai' }) };
-    for (const s of SECTIONS) for (const f of s.fields) {
-      if (f.type === 'group' || f.type === 'docs') continue;
-      // Some labels repeat across UAE and non-UAE variants of a question: keep whichever was answered.
-      const row = rows.find(r => r.name === f.name);
-      if (!record[f.label]) record[f.label] = row ? row.value : '';
-    }
-    const { cells, people } = peopleRecords(values, countryName);
-    Object.assign(record, cells);
-    record.Documents = documents.map(d => `${d.label}: ${d.na ? d.name : d.url}`).join('\n');
-    record['Declaration accepted'] = 'Yes';
-    const peopleRows = people.map(p => ({ Reference: ref, Company: legalName, ...p }));
-    tasks.push(fetch(process.env.SHEET_WEBHOOK_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret: process.env.SHEET_SECRET || '', record, people: peopleRows }),
-    }).then(async r => {
-      const text = await r.text().catch(() => '');
-      if (!r.ok || !/"ok":\s*true/.test(text)) console.error('Sheet webhook failed', r.status, text.slice(0, 300));
-      else console.log('Sheet row added', ref);
-    }).catch(e => console.error('Sheet webhook failed', e.message)));
-  } else {
-    console.warn('SHEET_WEBHOOK_URL is not set, so no sheet row was added');
-  }
+  const linkNote = bigPdfUrl
+    ? `The full submission PDF is larger than an email can carry, so it is available here: <a href="${bigPdfUrl}">${esc(baseName)}.pdf</a>. It contains every answer, the signed declaration and the supporting documents as annexes.`
+    : internal
+      ? `The full submission is attached as one PDF: <b>${esc(baseName)}.pdf</b>. It contains every answer, the signed declaration and the supporting documents as annexes.`
+      : 'The supporting documents are attached. The summary PDF could not be generated this time, so please refer to the details above.';
+  const extraLinks = looseLinks.length ? `<br><br>Documents too large to attach: ${looseLinks.map(d => `<a href="${d.url}">${esc(d.label)}</a>`).join(', ')}` : '';
+  const emails = [{
+    to: to.join(','), name: senderName, replyTo: String(values.email).trim(),
+    subject: `${legalName} | ${FORM_NAME} (${ref})`,
+    html: emailHtml({ origin, eyebrow: 'New customer / supplier submission', title: legalName, facts,
+      intro: `A customer / supplier has completed the ${FORM_NAME}. The key details are below.`, note: linkNote + extraLinks }),
+    attachments,
+    required: true,
+  }];
   if (process.env.SEND_SUPPLIER_COPY !== 'false') {
-    tasks.push(sendEmail({
-      from, to: [String(values.email).trim()], reply_to: to[0],
+    emails.push({
+      to: String(values.email).trim(), name: senderName, replyTo: to[0],
       subject: `Your ${FORM_NAME} has been received (${ref})`,
       html: emailHtml({ origin, eyebrow: 'Submission received', title: 'Thank you, we have received your details',
         intro: `Dear ${esc(values.contactName)}, thank you for completing the ${FORM_NAME} for <b>${esc(legalName)}</b>. Our team will review the information and update your Customer / Supplier record.`,
         facts: [['Reference', ref], ['Submitted', `${uaeTime(submittedAt)} (UAE)`], ['Company', legalName]],
-        note: supplierPdf
-          ? `A copy of your answers is attached as a PDF for your records. If anything changes, please reply to this email.`
-          : 'If anything changes, please reply to this email.' }),
-      attachments: supplierPdf ? [{ filename: `${baseName}.pdf`, content: Buffer.from(supplierPdf).toString('base64') }] : [],
-    }).catch(e => console.error('Supplier copy failed', e.message)));
+        note: supplierPdf ? 'A copy of your answers is attached as a PDF for your records. If anything changes, please reply to this email.' : 'If anything changes, please reply to this email.' }),
+      attachments: supplierPdf ? [{ name: `${baseName}.pdf`, mimeType: 'application/pdf', base64: Buffer.from(supplierPdf).toString('base64') }] : [],
+    });
   }
-  await Promise.all(tasks);
+
+  const record = { Reference: ref, 'Submitted at (UAE)': new Date(submittedAt).toLocaleString('en-GB', { timeZone: 'Asia/Dubai' }) };
+  for (const s of SECTIONS) for (const f of s.fields) {
+    if (f.type === 'group' || f.type === 'docs') continue;
+    // Some labels repeat across UAE and non-UAE variants of a question: keep whichever was answered.
+    const row = rows.find(r => r.name === f.name);
+    if (!record[f.label]) record[f.label] = row ? row.value : '';
+  }
+  const { cells, people } = peopleRecords(values, countryName);
+  Object.assign(record, cells);
+  record.Documents = documents.map(d => `${d.label}: ${d.na ? d.name : d.url}`).join('\n');
+  if (bigPdfUrl) record['Submission PDF'] = bigPdfUrl;
+  record['Declaration accepted'] = 'Yes';
+  const peopleRows = people.map(p => ({ Reference: ref, Company: legalName, ...p }));
+  const match = {
+    invite: String(invite || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40),
+    emails: [values.email, values.companyEmail].map(x => String(x || '').trim().toLowerCase()).filter(Boolean),
+    ref, company: legalName,
+  };
+
+  try {
+    await postToSheet({ record, people: peopleRows, emails, match });
+    console.log('Submission logged and emailed', ref);
+  } catch (e) {
+    console.error(e.message);
+    return res.status(502).json({ ok: false, error: 'We could not send your submission right now. Please try again in a minute.' });
+  }
 
   return res.status(200).json({ ok: true, ref });
 }
