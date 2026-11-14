@@ -5,7 +5,7 @@ import { COUNTRIES } from '../src/countries.js';
 const byCode = Object.fromEntries(COUNTRIES.map(c => [c.code, c.name]));
 const countryName = code => byCode[code] || code;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const BLOB_HOST = /^https:\/\/[a-z0-9]+\.public\.blob\.vercel-storage\.com\//i;
+const DRIVE_ID = /^[A-Za-z0-9_-]{20,80}$/;
 const FORM_NAME = 'UAE e-Invoicing (PEPPOL) Declaration';
 const safeFile = s => String(s).replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
 
@@ -63,13 +63,13 @@ const ATTACH_LIMIT = 17 * 1024 * 1024;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
-  const { values: raw = {}, files = [], hp, invite } = req.body || {};
+  const { values: raw = {}, files = [], hp, invite, session } = req.body || {};
   if (hp) return res.status(200).json({ ok: true, ref: makeRef() }); // bot honeypot
 
   // Server-side validation mirrors the browser. Documents are judged only by what was actually uploaded.
   const uploads = (Array.isArray(files) ? files : []).filter(f => f && typeof f.field === 'string');
   for (const up of uploads) {
-    if (!BLOB_HOST.test(String(up.url))) return res.status(400).json({ ok: false, error: 'Invalid document link.' });
+    if (!DRIVE_ID.test(String(up.id))) return res.status(400).json({ ok: false, error: 'Invalid document reference.' });
   }
   const values = { ...raw };
   for (const g of GROUPS()) values[g.name] = (Array.isArray(raw[g.name]) ? raw[g.name] : []).slice(0, 50);
@@ -100,18 +100,25 @@ export default async function handler(req, res) {
     const col = `${String(slot.group).replace(/^(.*?\d+):.*$/, '$1')}: ${slot.label}`;
     if (d.na) { documents.push({ field: slot.key, label, col, name: `Not applicable: ${d.reason}`, na: true }); continue; }
     for (const [n, up] of d.files.entries()) {
-      let bytes = null;
-      try {
-        const r = await fetch(up.url);
-        if (!r.ok) throw new Error(String(r.status));
-        bytes = new Uint8Array(await r.arrayBuffer());
-      } catch (e) { console.error('Document download failed', slot.key, e.message); }
-      const ext = String(up.url).split('?')[0].split('.').pop().toLowerCase();
-      const contentType = ext === 'pdf' ? 'application/pdf' : ext === 'png' ? 'image/png' : 'image/jpeg';
-      documents.push({ field: slot.key, col: n ? `${col} (${n + 1})` : col, label: d.files.length > 1 ? `${label} (${n + 1} of ${d.files.length})` : label, name: up.name || `${slot.label}.${ext}`, url: up.url, ext, contentType, bytes });
+      const contentType = /pdf/.test(up.contentType) ? 'application/pdf' : /png/.test(up.contentType) ? 'image/png' : 'image/jpeg';
+      const ext = contentType === 'application/pdf' ? 'pdf' : contentType === 'image/png' ? 'png' : 'jpg';
+      documents.push({ field: slot.key, col: n ? `${col} (${n + 1})` : col, label: d.files.length > 1 ? `${label} (${n + 1} of ${d.files.length})` : label, name: up.name || `${slot.label}.${ext}`, driveId: up.id, ext, contentType, bytes: null });
     }
   }
-
+  // Fetch the documents back from Google Drive (a few at a time); they go inside the PDF as annexes.
+  const toFetch = documents.filter(d => d.driveId);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(4, toFetch.length) }, async () => {
+    while (next < toFetch.length) {
+      const d = toFetch[next++];
+      try {
+        const f = await postToSheet({ action: 'file', id: d.driveId });
+        d.bytes = new Uint8Array(Buffer.from(f.base64, 'base64'));
+        if (f.mimeType) d.contentType = f.mimeType;
+      } catch (e) { console.error('Document download failed', d.field, e.message); }
+    }
+  }));
+  if (toFetch.some(d => !d.bytes)) return res.status(502).json({ ok: false, error: 'We could not read one of your documents. Please try again.' });
   // Build the PDFs. If anything goes wrong here, the email still goes out with the original documents.
   const baseName = safeFile(`${legalName} - ${FORM_NAME} - ${ref}`);
   let internal = null, supplierPdf = null;
@@ -122,20 +129,12 @@ export default async function handler(req, res) {
     supplierPdf = (await buildSubmissionPdf({ ref, submittedAt, values, rows, documents: documents.map(({ label, name, na }) => ({ label, name, na })), mode: 'supplier' })).bytes;
   } catch (e) { console.error('Supplier PDF failed', e); }
 
+  const driveUrl = id => `https://drive.google.com/file/d/${id}/view`;
   const attachments = [];
-  // The full PDF is always stored, so the sheet can link to it. Small ones are also attached to the email.
-  let pdfUrl = '', bigPdfUrl = '';
-  if (internal) {
-    try {
-      const { put } = await import('@vercel/blob');
-      const blob = await put(`submissions/${ref}/${baseName}.pdf`, Buffer.from(internal.bytes), { access: 'public', contentType: 'application/pdf', addRandomSuffix: true });
-      pdfUrl = blob.url;
-    } catch (e) { console.error('PDF upload failed', e.message); }
-    if (internal.bytes.length > ATTACH_LIMIT && pdfUrl) bigPdfUrl = pdfUrl;
-    else attachments.push({ name: `${baseName}.pdf`, mimeType: 'application/pdf', base64: Buffer.from(internal.bytes).toString('base64') });
-  }
+  // The Google script saves the full PDF into the company's Drive folder; small ones are also attached to the email.
+  const bigPdf = !!internal && internal.bytes.length > ATTACH_LIMIT;
   // Any document that could not be merged into the PDF (or every document, if the PDF failed) is attached as is.
-  let attachedBytes = internal && !bigPdfUrl ? internal.bytes.length : 0;
+  let attachedBytes = internal && !bigPdf ? internal.bytes.length : 0;
   const looseLinks = [];
   documents.forEach((d, i) => {
     const merged = d.na || (internal && internal.documents[i] && !/separately/.test(internal.documents[i].note));
@@ -161,18 +160,19 @@ export default async function handler(req, res) {
     ['Primary contact email', val('email')],
   ];
 
-  const linkNote = bigPdfUrl
-    ? `The full submission PDF is larger than an email can carry, so it is available here: <a href="${bigPdfUrl}">${esc(baseName)}.pdf</a>. It contains every answer, the signed declaration and the supporting documents as annexes.`
+  const linkNote = bigPdf
+    ? `The full submission PDF is larger than an email can carry, so it is saved in Google Drive: <a href="{{PDF_URL}}">${esc(baseName)}.pdf</a>. It contains every answer, the signed declaration and the supporting documents as annexes.`
     : internal
       ? `The full submission is attached as one PDF: <b>${esc(baseName)}.pdf</b>. It contains every answer, the signed declaration and the supporting documents as annexes.`
       : 'The supporting documents are attached. The summary PDF could not be generated this time, so please refer to the details above.';
-  const extraLinks = looseLinks.length ? `<br><br>Documents too large to attach: ${looseLinks.map(d => `<a href="${d.url}">${esc(d.label)}</a>`).join(', ')}` : '';
+  const extraLinks = looseLinks.length ? `<br><br>Documents too large to attach: ${looseLinks.map(d => `<a href="${driveUrl(d.driveId)}">${esc(d.label)}</a>`).join(', ')}` : '';
   const emails = [{
     to: to.join(','), name: senderName, replyTo: String(values.email).trim(),
     subject: `${legalName} | ${FORM_NAME} (${ref})`,
     html: emailHtml({ origin, eyebrow: 'New customer / supplier submission', title: legalName, facts,
       intro: `A customer / supplier has completed the ${FORM_NAME}. The key details are below.`, note: linkNote + extraLinks }),
     attachments,
+    attachPdf: !!internal && !bigPdf,
     required: true,
   }];
   if (process.env.SEND_SUPPLIER_COPY !== 'false') {
@@ -198,8 +198,9 @@ export default async function handler(req, res) {
   Object.assign(record, cells);
   // Clickable links in the sheet: the full PDF first, then one column per document.
   const link = (url, text) => `=HYPERLINK("${String(url).replace(/"/g, '%22')}","${text}")`;
-  record['Full submission PDF'] = pdfUrl ? link(pdfUrl, 'Open PDF') : '';
-  for (const d of documents) record[`Doc: ${d.col}`] = d.na ? d.name : link(d.url, 'Open file');
+  record['Full submission PDF'] = '{{PDF_CELL}}';     // filled in by the Google script once the PDF is saved
+  record['Documents folder'] = '{{FOLDER_CELL}}';
+  for (const d of documents) record[`Doc: ${d.col}`] = d.na ? d.name : link(driveUrl(d.driveId), 'Open file');
   record['Declaration accepted'] = 'Yes';
   const peopleRows = people.map(p => ({ Reference: ref, Company: legalName, ...p }));
   const match = {
@@ -209,7 +210,9 @@ export default async function handler(req, res) {
   };
 
   try {
-    await postToSheet({ record, people: peopleRows, emails, match });
+    await postToSheet({ record, people: peopleRows, emails, match,
+      folder: { name: safeFile(`${legalName} - ${ref}`), ids: documents.filter(d => d.driveId).map(d => d.driveId) },
+      pdf: internal ? { name: `${baseName}.pdf`, base64: Buffer.from(internal.bytes).toString('base64') } : null });
     console.log('Submission logged and emailed', ref);
   } catch (e) {
     console.error(e.message);

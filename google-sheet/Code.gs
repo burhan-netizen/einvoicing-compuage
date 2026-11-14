@@ -6,6 +6,7 @@
  *  1. Receives every form submission from the website, logs it (Submissions + People tabs)
  *     and sends the two emails from this Google account: the full PDF to CompuAge and a copy
  *     to the customer / supplier.
+ *     Uploaded documents are saved in Google Drive: My Drive > CompuAge e-Invoicing Documents.
  *  2. Sends the invitation email (and later reminders) to everyone in the Recipients tab,
  *     in small batches, within Google's daily sending limit.
  *
@@ -80,43 +81,125 @@ function setupTabs() {
   [TAB.submissions, TAB.people].forEach(n => { if (!ss.getSheetByName(n)) ss.insertSheet(n); });
   const log = ss.getSheetByName(TAB.log) || ss.insertSheet(TAB.log);
   if (!log.getLastRow()) { log.getRange(1, 1, 1, 5).setValues([['Time (UAE)', 'Type', 'To', 'Result', 'Details']]); styleHeader(log, 5); }
+  docsFolder('Incoming'); docsFolder('Submissions');
   toast('Tabs are ready. Paste your contacts into the Recipients tab: Company, Contact name, Email, Type.');
 }
 
 /* ----------------------------------------------------- website webhook */
 
-// The website posts here after every submission.
+// The website posts here: document uploads from the browser, file reads and submissions from the server.
 function doPost(e) {
+  let data;
+  try { data = JSON.parse(e.postData.contents); } catch (err) { return json({ ok: false, error: 'bad request' }); }
+  if (data.action === 'upload') return handleUpload(data);
+  if (SECRET && data.secret !== SECRET) return json({ ok: false, error: 'unauthorised' });
+  if (data.action === 'file') return handleFile(data);
+
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    const data = JSON.parse(e.postData.contents);
-    if (SECRET && data.secret !== SECRET) return json({ ok: false, error: 'unauthorised' });
     const emails = Array.isArray(data.emails) ? data.emails : [];
     const notes = [];
+    const record = data.record || {};
+
+    // Put the documents and the full PDF into the company's own Drive folder.
+    let pdfFile = null, folder = null;
+    try {
+      if (data.folder) {
+        folder = docsFolder('Submissions').createFolder(String(data.folder.name || 'Submission').slice(0, 200));
+        (data.folder.ids || []).forEach(id => {
+          try { const f = DriveApp.getFileById(id); if (isOurUpload(f)) f.moveTo(folder); } catch (err) { notes.push('Move failed: ' + id); }
+        });
+        if (data.pdf && data.pdf.base64) pdfFile = folder.createFile(Utilities.newBlob(Utilities.base64Decode(data.pdf.base64), 'application/pdf', data.pdf.name));
+      }
+    } catch (err) { notes.push('Drive folder failed: ' + err); }
+    const pdfUrl = pdfFile ? pdfFile.getUrl() : '';
+    record['Full submission PDF'] = pdfUrl ? hyperlink(pdfUrl, 'Open PDF') : '';
+    record['Documents folder'] = folder ? hyperlink(folder.getUrl(), 'Open folder') : '';
 
     // The email to CompuAge must go out, otherwise the website tells the customer / supplier to try again.
-    emails.filter(m => m.required).forEach(m => sendSubmissionEmail(m));
+    const prep = m => {
+      m.html = String(m.html).split('{{PDF_URL}}').join(pdfUrl || '#');
+      if (m.attachPdf && data.pdf && data.pdf.base64) {
+        m.attachments = [{ name: data.pdf.name, mimeType: 'application/pdf', base64: data.pdf.base64 }].concat(m.attachments || []);
+      }
+      return m;
+    };
+    emails.filter(m => m.required).forEach(m => sendSubmissionEmail(prep(m)));
     emails.filter(m => !m.required).forEach(m => {
-      try { sendSubmissionEmail(m); } catch (err) { notes.push('Copy email failed: ' + err); }
+      try { sendSubmissionEmail(prep(m)); } catch (err) { notes.push('Copy email failed: ' + err); }
     });
 
     // Logging is best effort: the submission has already reached CompuAge by email.
     try {
-      const record = data.record || {};
       if (data.match && data.match.invite) record['Invite ID'] = data.match.invite;
       appendRecord(TAB.submissions, record);
       (data.people || []).forEach(p => appendRecord(TAB.people, p));
       if (data.match) markSubmitted(data.match);
     } catch (err) { notes.push('Logging failed: ' + err); }
 
-    return json({ ok: true, notes: notes });
+    return json({ ok: true, notes: notes, pdfUrl: pdfUrl });
   } catch (err) {
     return json({ ok: false, error: String(err) });
   } finally {
     lock.releaseLock();
   }
 }
+
+/* ------------------------------------------- documents in Google Drive */
+
+const UPLOAD_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
+const UPLOAD_MAX = 10.5 * 1024 * 1024;
+const SLOT_RE = /^(tradeLicenceFile|vatCertFile|ctCertFile|ejariFile|(owners|signatories)\.\d{1,2}\.(passport|visa|eid))$/;
+
+// Browser upload: checked against a short-lived ticket signed by the website, then saved to Drive.
+function handleUpload(d) {
+  try {
+    const expected = Utilities.computeHmacSha256Signature(d.session + '.' + d.exp, SECRET)
+      .map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('');
+    if (!d.sig || d.sig !== expected || Number(d.exp) < Date.now()) return json({ ok: false, error: 'Upload link expired. Please refresh the page and try again.' });
+    if (!/^[a-f0-9]{10,40}$/.test(String(d.session)) || !SLOT_RE.test(String(d.slot)) || UPLOAD_TYPES.indexOf(d.mimeType) < 0) return json({ ok: false, error: 'File not accepted' });
+    const bytes = Utilities.base64Decode(String(d.base64 || ''));
+    if (!bytes.length || bytes.length > UPLOAD_MAX) return json({ ok: false, error: 'File is empty or larger than 10 MB' });
+    const name = String(d.name || 'document').replace(/[\\/:*?"<>|]+/g, '').slice(0, 120);
+    const file = docsFolder('Incoming').createFile(Utilities.newBlob(bytes, d.mimeType, d.slot + '-' + (Number(d.n) || 0) + ' - ' + name));
+    file.setDescription('cmpg-upload:' + d.session);
+    return json({ ok: true, id: file.getId() });
+  } catch (err) {
+    return json({ ok: false, error: String(err) });
+  }
+}
+
+// Server read-back, so the website can put the documents inside the PDF.
+function handleFile(d) {
+  try {
+    const f = DriveApp.getFileById(String(d.id));
+    if (!isOurUpload(f)) return json({ ok: false, error: 'not found' });
+    const blob = f.getBlob();
+    return json({ ok: true, mimeType: blob.getContentType(), base64: Utilities.base64Encode(blob.getBytes()) });
+  } catch (err) {
+    return json({ ok: false, error: String(err) });
+  }
+}
+
+function isOurUpload(f) { return String(f.getDescription() || '').indexOf('cmpg-upload:') === 0; }
+
+// "CompuAge e-Invoicing Documents" in My Drive, with "Incoming" and "Submissions" inside.
+function docsFolder(sub) {
+  const props = PropertiesService.getScriptProperties();
+  const key = 'folder_' + sub;
+  const cached = props.getProperty(key);
+  if (cached) { try { return DriveApp.getFolderById(cached); } catch (err) { /* recreate below */ } }
+  let rootId = props.getProperty('folder_root'), root = null;
+  if (rootId) { try { root = DriveApp.getFolderById(rootId); } catch (err) { root = null; } }
+  if (!root) { root = DriveApp.createFolder('CompuAge e-Invoicing Documents'); props.setProperty('folder_root', root.getId()); }
+  const it = root.getFoldersByName(sub);
+  const folder = it.hasNext() ? it.next() : root.createFolder(sub);
+  props.setProperty(key, folder.getId());
+  return folder;
+}
+
+function hyperlink(url, text) { return '=HYPERLINK("' + String(url).replace(/"/g, '%22') + '","' + text + '")'; }
 
 // Opening the Web app URL in a browser shows this, as a quick health check.
 function doGet() {

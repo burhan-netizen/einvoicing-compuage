@@ -1,4 +1,3 @@
-import { upload } from '@vercel/blob/client';
 import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
 import { COUNTRIES } from './countries.js';
 import { SECTIONS, DECLARATION, MAX_FILE_MB, FILE_TYPES, isShown, isRequired, validate, summaryRows, groupItems, docSlots, docRows } from '../lib/schema.js';
@@ -550,31 +549,32 @@ async function submit() {
       if (d && d.na) continue;
       (files[slot.key] || []).forEach((file, n) => toSend.push([slot.key, file, n]));
     }
-    const total = toSend.reduce((a, [, f]) => a + f.size, 0) || 1;
     const loaded = {};
     const bar = h('span');
     if (toSend.length) status.replaceChildren(h('div', { class: 'uploading' }, 'Uploading documents securely', h('div', { class: 'bar' }, bar)));
-    const safe = (v.legalName || 'supplier').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'supplier';
-    const uploaded = await Promise.all(toSend.map(async ([field, file, n]) => {
-      const ext = (file.name.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '');
+    // Phone photos are shrunk first, so uploads are quick and storage stays small.
+    const prepared = await Promise.all(toSend.map(async ([field, file, n]) => [field, await compressImage(file), n, file.name]));
+    const total = prepared.reduce((a, [, f]) => a + f.size, 0) || 1;
+    const progress = (id, done) => { loaded[id] = done; bar.style.width = `${Math.min(100, (Object.values(loaded).reduce((a, b) => a + b, 0) / total) * 100)}%`; };
+    let ticket = null;
+    if (!PREVIEW && prepared.length) {
+      const r = await fetch('/api/upload-token', { method: 'POST' });
+      ticket = await r.json().catch(() => null);
+      if (!r.ok || !ticket || !ticket.url) throw new Error('We could not start the document upload.');
+    }
+    const uploaded = await mapLimit(prepared, 3, async ([field, file, n, origName]) => {
       const id = `${field}-${n}`;
-      const progress = done => { loaded[id] = done; bar.style.width = `${Math.min(100, (Object.values(loaded).reduce((a, b) => a + b, 0) / total) * 100)}%`; };
-      let blob;
       if (PREVIEW) {
-        for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 60)); progress((file.size * i) / 10); }
-        return { field, n, url: '', name: file.name, contentType: file.type, size: file.size };
+        for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 60)); progress(id, (file.size * i) / 10); }
+        return { field, n, id: '', name: origName, contentType: file.type, size: file.size };
       }
-      try {
-        blob = await upload(`suppliers/${safe}/${id}.${ext}`, file, {
-          access: 'public', handleUploadUrl: '/api/upload', contentType: file.type,
-          onUploadProgress: p => progress(p.loaded),
-        });
-      } catch (e) {
-        console.error(e);
-        throw new Error('We could not upload your documents.');
+      let out;
+      for (let attempt = 0; attempt < 2 && !out; attempt++) {
+        try { out = await uploadToDrive(ticket, field, n, file, origName, p => progress(id, p)); }
+        catch (e) { console.error(e); if (attempt) throw new Error('We could not upload your documents.'); }
       }
-      return { field, n, url: blob.url, name: file.name, contentType: file.type, size: file.size };
-    }));
+      return { field, n, id: out, name: origName, contentType: file.type, size: file.size };
+    });
     status.replaceChildren(h('div', { class: 'uploading' }, 'Sending your details'));
     if (PREVIEW) {
       await new Promise(r => setTimeout(r, 700));
@@ -592,6 +592,59 @@ async function submit() {
     status.replaceChildren(h('div', { class: 'alert' }, `${err.message || 'Submission failed.'} Please try again, or email admin@compuagedubai.com if it keeps happening.`));
     btn.disabled = false; $('#back').disabled = false; btn.textContent = 'Submit form';
   }
+}
+
+// ---- Document uploads: straight from the browser to CompuAge's Google Drive ----
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
+  }));
+  return out;
+}
+
+async function compressImage(file) {
+  if (!/^image\/(jpeg|png)$/.test(file.type) || file.size < 400 * 1024 || typeof createImageBitmap !== 'function') return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
+    if (!blob || blob.size >= file.size) return file;
+    return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+  } catch { return file; }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+async function uploadToDrive(ticket, field, n, file, origName, onProgress) {
+  const base64 = await fileToBase64(file);
+  const body = JSON.stringify({ action: 'upload', session: ticket.session, exp: ticket.exp, sig: ticket.sig,
+    slot: field, n, name: origName, mimeType: file.type, base64 });
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', ticket.url);
+    x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8'); // a "simple" request, so no CORS preflight
+    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(file.size * e.loaded / e.total); };
+    x.onload = () => {
+      let d = null; try { d = JSON.parse(x.responseText); } catch { /* not JSON */ }
+      if (x.status >= 200 && x.status < 300 && d && d.ok && d.id) { onProgress(file.size); resolve(d.id); }
+      else reject(new Error((d && d.error) || `Upload failed (${x.status})`));
+    };
+    x.onerror = () => reject(new Error('Network error while uploading'));
+    x.timeout = 120000; x.ontimeout = () => reject(new Error('Upload timed out'));
+    x.send(body);
+  });
 }
 
 function showDone(ref, email) {
