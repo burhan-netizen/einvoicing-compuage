@@ -571,7 +571,7 @@ async function submit() {
       let out;
       for (let attempt = 0; attempt < 2 && !out; attempt++) {
         try { out = await uploadToDrive(ticket, field, n, file, origName, p => progress(id, p)); }
-        catch (e) { console.error(e); if (attempt) throw new Error('We could not upload your documents.'); }
+        catch (e) { console.error(e); if (attempt) throw new Error(`We could not upload your documents (${e.message}).`); }
       }
       return { field, n, id: out, name: origName, contentType: file.type, size: file.size };
     });
@@ -631,20 +631,16 @@ async function uploadToDrive(ticket, field, n, file, origName, onProgress) {
   const base64 = await fileToBase64(file);
   const body = JSON.stringify({ action: 'upload', session: ticket.session, exp: ticket.exp, sig: ticket.sig,
     slot: field, n, name: origName, mimeType: file.type, base64 });
-  return new Promise((resolve, reject) => {
-    const x = new XMLHttpRequest();
-    x.open('POST', ticket.url);
-    x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8'); // a "simple" request, so no CORS preflight
-    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(file.size * e.loaded / e.total); };
-    x.onload = () => {
-      let d = null; try { d = JSON.parse(x.responseText); } catch { /* not JSON */ }
-      if (x.status >= 200 && x.status < 300 && d && d.ok && d.id) { onProgress(file.size); resolve(d.id); }
-      else reject(new Error((d && d.error) || `Upload failed (${x.status})`));
-    };
-    x.onerror = () => reject(new Error('Network error while uploading'));
-    x.timeout = 120000; x.ontimeout = () => reject(new Error('Upload timed out'));
-    x.send(body);
-  });
+  // Plain text body and no extra headers or progress listeners: a "simple" request, so the
+  // browser sends no CORS preflight (Google Apps Script cannot answer one).
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 120000);
+  try {
+    const r = await fetch(ticket.url, { method: 'POST', body, redirect: 'follow', signal: ctrl.signal });
+    const d = await r.json().catch(() => null);
+    if (!r.ok || !d || !d.ok || !d.id) throw new Error((d && d.error) || `Upload failed (${r.status})`);
+    onProgress(file.size);
+    return d.id;
+  } finally { clearTimeout(timer); }
 }
 
 function showDone(ref, email) {
