@@ -589,7 +589,7 @@ async function submit() {
     showDone(data.ref, v.email);
   } catch (err) {
     console.error(err);
-    status.replaceChildren(h('div', { class: 'alert' }, `${err.message || 'Submission failed.'} Please try again, or email accounts@compuagedubai.com if it keeps happening.`));
+    status.replaceChildren(h('div', { class: 'alert' }, `${err.message || 'Submission failed.'} Please try again, or email admin@compuagedubai.com if it keeps happening.`));
     btn.disabled = false; $('#back').disabled = false; btn.textContent = 'Submit form';
   }
 }

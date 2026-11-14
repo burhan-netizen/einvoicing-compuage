@@ -30,7 +30,7 @@ const SETTINGS = [
   ['Deadline', '', 'Optional, for example: 30 November 2026. Leave blank to leave the date out of the emails.'],
   ['Sender name', COMPANY, 'Shown as the sender name. The emails come from this Google account.'],
   ['Reply-to email', 'admin@compuagedubai.com', 'Where replies to invitations and reminders go.'],
-  ['Questions email', 'accounts@compuagedubai.com', 'Shown in the email as the contact for questions.'],
+  ['Questions email', 'admin@compuagedubai.com', 'Shown in the email as the contact for questions.'],
   ['Sign-off name', 'Accounts Team', 'First line of the sign-off.'],
   ['Sign-off company', COMPANY, 'Second line of the sign-off.'],
   ['Invitation subject', 'Action required: UAE e-Invoicing (PEPPOL) details for ' + COMPANY, ''],

@@ -8,7 +8,7 @@ Static form (public/) with two Vercel functions (api/). Questions live in lib/sc
 | --- | --- |
 | RESEND_API_KEY | Resend API key |
 | MAIL_FROM | Sender on a domain verified in Resend, e.g. `CompuAge Supplier Onboarding <suppliers@magolabs.in>` |
-| MAIL_TO | `accounts@compuagedubai.com` (comma separate for more) |
+| MAIL_TO | `admin@compuagedubai.com` (comma separate for more) |
 | SHEET_WEBHOOK_URL | Apps Script web app URL (see google-sheet/Code.gs) |
 | SHEET_SECRET | Optional, must match SECRET in Code.gs |
 | SEND_SUPPLIER_COPY | `false` to stop sending the supplier a copy |
