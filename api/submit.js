@@ -121,7 +121,7 @@ export default async function handler(req, res) {
     if (!merged && d.bytes) attachments.push({ filename: safeFile(`${legalName} - ${d.label}.${d.ext}`), content: Buffer.from(d.bytes).toString('base64') });
   });
 
-  const from = process.env.MAIL_FROM || 'CompuAge Supplier Onboarding <onboarding@resend.dev>';
+  const from = process.env.MAIL_FROM || 'CompuAge Customer / Supplier Onboarding <onboarding@resend.dev>';
   const to = (process.env.MAIL_TO || 'accounts@compuagedubai.com').split(',').map(s => s.trim()).filter(Boolean);
   const facts = [
     ['Reference', ref],
@@ -142,8 +142,8 @@ export default async function handler(req, res) {
       from, to,
       reply_to: String(values.email).trim(),
       subject: `${legalName} | ${FORM_NAME} (${ref})`,
-      html: emailHtml({ origin, eyebrow: 'New supplier submission', title: legalName, facts,
-        intro: `A supplier has completed the ${FORM_NAME}. The key details are below.`,
+      html: emailHtml({ origin, eyebrow: 'New customer / supplier submission', title: legalName, facts,
+        intro: `A customer / supplier has completed the ${FORM_NAME}. The key details are below.`,
         note: internal
           ? `The full submission is attached as one PDF: <b>${esc(baseName)}.pdf</b>. It contains every answer, the signed declaration and the supporting documents as annexes.`
           : 'The supporting documents are attached. The summary PDF could not be generated this time, so please refer to the details above.' }),
@@ -185,7 +185,7 @@ export default async function handler(req, res) {
       from, to: [String(values.email).trim()], reply_to: to[0],
       subject: `Your ${FORM_NAME} has been received (${ref})`,
       html: emailHtml({ origin, eyebrow: 'Submission received', title: 'Thank you, we have received your details',
-        intro: `Dear ${esc(values.contactName)}, thank you for completing the ${FORM_NAME} for <b>${esc(legalName)}</b>. Our team will review the information and update your supplier record.`,
+        intro: `Dear ${esc(values.contactName)}, thank you for completing the ${FORM_NAME} for <b>${esc(legalName)}</b>. Our team will review the information and update your Customer / Supplier record.`,
         facts: [['Reference', ref], ['Submitted', `${uaeTime(submittedAt)} (UAE)`], ['Company', legalName]],
         note: supplierPdf
           ? `A copy of your answers is attached as a PDF for your records. If anything changes, please reply to this email.`
