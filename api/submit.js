@@ -96,7 +96,9 @@ export default async function handler(req, res) {
   for (const slot of docSlots(values)) {
     const d = values.docs[slot.key];
     const label = `${slot.group}: ${slot.label}`;
-    if (d.na) { documents.push({ field: slot.key, label, name: `Not applicable: ${d.reason}`, na: true }); continue; }
+    // Sheet column: same for every company (no person names), e.g. "Owner / Partner 1: Passport copy".
+    const col = `${String(slot.group).replace(/^(.*?\d+):.*$/, '$1')}: ${slot.label}`;
+    if (d.na) { documents.push({ field: slot.key, label, col, name: `Not applicable: ${d.reason}`, na: true }); continue; }
     for (const [n, up] of d.files.entries()) {
       let bytes = null;
       try {
@@ -106,7 +108,7 @@ export default async function handler(req, res) {
       } catch (e) { console.error('Document download failed', slot.key, e.message); }
       const ext = String(up.url).split('?')[0].split('.').pop().toLowerCase();
       const contentType = ext === 'pdf' ? 'application/pdf' : ext === 'png' ? 'image/png' : 'image/jpeg';
-      documents.push({ field: slot.key, label: d.files.length > 1 ? `${label} (${n + 1} of ${d.files.length})` : label, name: up.name || `${slot.label}.${ext}`, url: up.url, ext, contentType, bytes });
+      documents.push({ field: slot.key, col: n ? `${col} (${n + 1})` : col, label: d.files.length > 1 ? `${label} (${n + 1} of ${d.files.length})` : label, name: up.name || `${slot.label}.${ext}`, url: up.url, ext, contentType, bytes });
     }
   }
 
@@ -121,15 +123,16 @@ export default async function handler(req, res) {
   } catch (e) { console.error('Supplier PDF failed', e); }
 
   const attachments = [];
-  let bigPdfUrl = '';
-  if (internal && internal.bytes.length > ATTACH_LIMIT) {
+  // The full PDF is always stored, so the sheet can link to it. Small ones are also attached to the email.
+  let pdfUrl = '', bigPdfUrl = '';
+  if (internal) {
     try {
       const { put } = await import('@vercel/blob');
       const blob = await put(`submissions/${ref}/${baseName}.pdf`, Buffer.from(internal.bytes), { access: 'public', contentType: 'application/pdf', addRandomSuffix: true });
-      bigPdfUrl = blob.url;
-    } catch (e) { console.error('Large PDF upload failed', e.message); }
-  } else if (internal) {
-    attachments.push({ name: `${baseName}.pdf`, mimeType: 'application/pdf', base64: Buffer.from(internal.bytes).toString('base64') });
+      pdfUrl = blob.url;
+    } catch (e) { console.error('PDF upload failed', e.message); }
+    if (internal.bytes.length > ATTACH_LIMIT && pdfUrl) bigPdfUrl = pdfUrl;
+    else attachments.push({ name: `${baseName}.pdf`, mimeType: 'application/pdf', base64: Buffer.from(internal.bytes).toString('base64') });
   }
   // Any document that could not be merged into the PDF (or every document, if the PDF failed) is attached as is.
   let attachedBytes = internal && !bigPdfUrl ? internal.bytes.length : 0;
@@ -193,8 +196,10 @@ export default async function handler(req, res) {
   }
   const { cells, people } = peopleRecords(values, countryName);
   Object.assign(record, cells);
-  record.Documents = documents.map(d => `${d.label}: ${d.na ? d.name : d.url}`).join('\n');
-  if (bigPdfUrl) record['Submission PDF'] = bigPdfUrl;
+  // Clickable links in the sheet: the full PDF first, then one column per document.
+  const link = (url, text) => `=HYPERLINK("${String(url).replace(/"/g, '%22')}","${text}")`;
+  record['Full submission PDF'] = pdfUrl ? link(pdfUrl, 'Open PDF') : '';
+  for (const d of documents) record[`Doc: ${d.col}`] = d.na ? d.name : link(d.url, 'Open file');
   record['Declaration accepted'] = 'Yes';
   const peopleRows = people.map(p => ({ Reference: ref, Company: legalName, ...p }));
   const match = {

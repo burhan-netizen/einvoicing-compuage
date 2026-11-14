@@ -599,7 +599,7 @@ function showDone(ref, email) {
   $('#form').replaceChildren(h('div', { class: 'done panel' },
     h('div', { class: 'tick', html: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>' }),
     h('h2', {}, 'Thank you. Your details have been submitted.'),
-    h('p', { html: `Our accounts team will review your information and update your Customer / Supplier record. A copy has been sent to <b>${esc(email)}</b>.` }),
+    h('p', { html: `Our admin team will review your information and update your Customer / Supplier record. A copy has been sent to <b>${esc(email)}</b>.` }),
     h('div', { class: 'ref' }, h('small', {}, 'Reference'), ref)));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
