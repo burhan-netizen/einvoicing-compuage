@@ -454,9 +454,16 @@ function buildInvite(mode, p, s) {
     '<div style="font-size:14px;line-height:1.65;color:#2e2e2e"><p style="margin:0 0 14px">' + greeting + '</p>' + intro + '</div>' +
     '</td></tr>' +
     '<tr><td align="left" style="padding:18px 28px 6px">' +
-    '<table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="border-radius:10px;background:#ef5a1e">' +
-    '<a href="' + link + '" style="display:inline-block;padding:13px 26px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:10px">Submit your details</a>' +
+    // Outlook desktop (Word engine) ignores padding and rounded corners on links, so it gets a
+    // VML button of its own; every other email app gets the normal HTML button.
+    '<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="' + link + '" ' +
+    'style="height:48px;v-text-anchor:middle;width:240px;" arcsize="21%" stroke="f" fillcolor="#ef5a1e"><w:anchorlock/>' +
+    '<center style="color:#ffffff;font-family:Arial,sans-serif;font-size:16px;font-weight:bold;">Submit your details</center></v:roundrect><![endif]-->' +
+    '<!--[if !mso]><!-- -->' +
+    '<table role="presentation" cellpadding="0" cellspacing="0"><tr><td align="center" bgcolor="#ef5a1e" style="border-radius:10px;background:#ef5a1e;padding:14px 28px">' +
+    '<a href="' + link + '" style="display:inline-block;font-family:Arial,sans-serif;font-size:16px;font-weight:700;line-height:20px;color:#ffffff;text-decoration:none">Submit your details</a>' +
     '</td></tr></table>' +
+    '<!--<![endif]-->' +
     '<p style="margin:10px 0 0;font-size:12px;color:#7a7a7a;word-break:break-all">Or open: <a href="' + link + '" style="color:#ef5a1e">' + esc(link) + '</a></p>' +
     '</td></tr>' +
     '<tr><td style="padding:18px 28px 0"><p style="margin:0 0 8px;font-size:13.5px;font-weight:700">Please keep these ready to upload</p>' +
