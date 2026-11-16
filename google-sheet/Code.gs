@@ -19,7 +19,7 @@
  */
 
 const SECRET = 'CHANGE-ME'; // same value as SHEET_SECRET in Vercel
-const SITE = 'https://einvoicing-compuage.vercel.app';
+const SITE = 'https://e-invoicing.compuagedubai.com';
 const MOF_URL = 'https://mof.gov.ae/einvoicing/';
 const COMPANY = 'CompuAge Computers L.L.C.';
 const TRN = '100274488400003';
